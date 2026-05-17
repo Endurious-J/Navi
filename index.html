@@ -1,0 +1,1373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Moto Route Planner — GPX Export</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0e0f11;
+    --surface: #16181c;
+    --surface2: #1e2128;
+    --border: #2a2d35;
+    --accent: #c8f060;
+    --accent-dim: #8aaa2a;
+    --text: #e8eaf0;
+    --text-muted: #6b7080;
+    --text-dim: #3d4150;
+    --danger: #ff5a5a;
+    --radius: 10px;
+  }
+
+  body {
+    font-family: 'Syne', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.3px; }
+  .tagline { font-size: 12px; color: var(--text-muted); font-family: 'DM Mono', monospace; margin-left: auto; }
+
+  .app {
+    display: grid;
+    grid-template-columns: 390px 1fr;
+    height: calc(100vh - 57px);
+  }
+
+  .sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    padding: 18px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    overflow-y: auto;
+    height: 100%;
+  }
+
+  .section-label {
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-family: 'DM Mono', monospace;
+    margin-bottom: 7px;
+  }
+
+  /* ── Mode tabs ── */
+  .mode-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 3px;
+    gap: 3px;
+  }
+  .mode-tab {
+    padding: 9px;
+    border-radius: 7px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: 'Syne', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: center;
+  }
+  .mode-tab:hover { color: var(--text); }
+  .mode-tab.active { background: var(--accent); color: #0a0f00; }
+
+  /* ── Waypoint blocks ── */
+  .waypoint-block {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    position: relative;
+  }
+  .waypoint-block .dot {
+    position: absolute;
+    left: -6px; top: 50%;
+    transform: translateY(-50%);
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    border: 2px solid var(--bg);
+  }
+  .dot.start { background: var(--accent); }
+  .dot.end   { background: var(--danger); }
+  .dot.loop  { background: var(--accent); box-shadow: 0 0 0 2px rgba(200,240,96,0.3); }
+
+  .wp-label {
+    font-size: 10px;
+    font-family: 'DM Mono', monospace;
+    color: var(--text-muted);
+    margin-bottom: 5px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  .search-row { display: flex; gap: 6px; }
+
+  .search-input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    font-size: 13px;
+    padding: 8px 10px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .search-input:focus { border-color: var(--accent); }
+  .search-input::placeholder { color: var(--text-dim); }
+
+  .icon-btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0 10px;
+    font-size: 15px;
+    transition: all 0.15s;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .suggestions {
+    margin-top: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    overflow: hidden;
+    display: none;
+    position: relative;
+    z-index: 500;
+  }
+  .suggestion-item {
+    padding: 7px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    transition: background 0.1s;
+    line-height: 1.4;
+  }
+  .suggestion-item:last-child { border-bottom: none; }
+  .suggestion-item:hover { background: var(--surface2); color: var(--text); }
+
+  .coord-display {
+    margin-top: 4px;
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    color: var(--accent-dim);
+    min-height: 14px;
+  }
+
+  .connector-line {
+    width: 2px; height: 10px;
+    background: var(--border);
+    margin: 4px auto;
+  }
+
+  .divider { height: 1px; background: var(--border); flex-shrink: 0; }
+
+  /* ── Sliders ── */
+  .slider-row { display: flex; align-items: center; gap: 10px; }
+  .slider-label { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+
+  input[type=range] {
+    flex: 1;
+    appearance: none;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    appearance: none;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    transition: transform 0.1s;
+  }
+  input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+  .slider-value {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    color: var(--accent);
+    min-width: 40px;
+    text-align: right;
+  }
+
+  .bar-wrap {
+    display: flex; align-items: center; gap: 8px; margin-top: 5px;
+  }
+  .bar-label { font-size: 10px; font-family: 'DM Mono', monospace; color: var(--text-muted); min-width: 50px; }
+  .mini-bar {
+    flex: 1; height: 4px; border-radius: 2px;
+    background: var(--border); overflow: hidden; position: relative;
+  }
+  .mini-fill {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    border-radius: 2px; transition: width 0.2s;
+  }
+  .fill-gravel { background: linear-gradient(to right, var(--accent-dim), #7a5020); }
+  .fill-dist   { background: var(--accent); }
+
+  /* ── Compass rose ── */
+  .compass-wrap {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+  }
+  .compass {
+    position: relative;
+    width: 96px; height: 96px;
+  }
+  .compass-ring {
+    width: 96px; height: 96px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    position: relative;
+  }
+  .compass-dir {
+    position: absolute;
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-family: 'DM Mono', monospace; color: var(--text-muted);
+    cursor: pointer; transition: all 0.12s;
+    transform: translate(-50%, -50%);
+    user-select: none;
+  }
+  .compass-dir:hover { border-color: var(--accent-dim); color: var(--text); }
+  .compass-dir.active { background: var(--accent); color: #0a0f00; border-color: var(--accent); font-weight: 700; }
+  .compass-dir.random-btn {
+    width: 30px; height: 30px;
+    font-size: 14px;
+    left: 50%; top: 50%;
+  }
+  .compass-label {
+    font-size: 10px; font-family: 'DM Mono', monospace;
+    color: var(--text-muted); text-align: center;
+  }
+  .compass-selected {
+    font-size: 11px; font-family: 'DM Mono', monospace;
+    color: var(--accent);
+  }
+
+  /* ── Style cards ── */
+  .style-scroll {
+    display: flex; gap: 8px; overflow-x: auto;
+    padding-bottom: 4px; scrollbar-width: none;
+  }
+  .style-scroll::-webkit-scrollbar { display: none; }
+
+  .type-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 9px;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.15s;
+    flex: 0 0 auto;
+    min-width: 78px;
+  }
+  .type-card:hover { border-color: var(--accent-dim); }
+  .type-card.active { border-color: var(--accent); background: rgba(200,240,96,0.06); }
+  .type-icon { font-size: 19px; margin-bottom: 4px; }
+  .type-name { font-size: 11px; font-weight: 600; }
+  .type-desc { font-size: 10px; color: var(--text-muted); margin-top: 2px; font-family: 'DM Mono', monospace; line-height: 1.3; }
+
+  /* ── Stats ── */
+  .route-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat-box {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px;
+  }
+  .stat-label { font-size: 10px; font-family: 'DM Mono', monospace; color: var(--text-muted); }
+  .stat-value { font-size: 20px; font-weight: 600; margin-top: 2px; color: var(--accent); }
+  .stat-unit  { font-size: 11px; color: var(--text-muted); }
+
+  /* ── Status ── */
+  .status-bar {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 9px 12px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px; color: var(--text-muted);
+    display: none; gap: 8px; align-items: flex-start; line-height: 1.5;
+  }
+  .status-bar.visible { display: flex; }
+  .status-bar.error   { border-color: var(--danger); color: var(--danger); }
+  .status-bar.success { border-color: var(--accent); color: var(--accent); }
+
+  /* ── Buttons ── */
+  .generate-btn {
+    background: var(--accent); color: #0a0f00;
+    border: none; border-radius: var(--radius);
+    font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 700;
+    padding: 13px; cursor: pointer; width: 100%;
+    transition: all 0.15s; flex-shrink: 0;
+  }
+  .generate-btn:hover { background: #d4f57a; transform: translateY(-1px); }
+  .generate-btn:active { transform: translateY(0); }
+  .generate-btn:disabled { background: var(--border); color: var(--text-dim); cursor: not-allowed; transform: none; }
+
+  .download-btn {
+    background: transparent;
+    border: 1px solid var(--accent); color: var(--accent);
+    border-radius: var(--radius);
+    font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 600;
+    padding: 10px; cursor: pointer; width: 100%;
+    transition: all 0.15s; flex-shrink: 0;
+  }
+  .download-btn:hover { background: rgba(200,240,96,0.08); }
+
+  /* ── Spinner ── */
+  .spinner {
+    width: 13px; height: 13px;
+    border: 2px solid var(--text-dim); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.7s linear infinite;
+    display: inline-block; flex-shrink: 0; margin-top: 1px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Map ── */
+  #map { width: 100%; height: 100%; }
+  .leaflet-container { background: #1a1c22 !important; }
+
+  .map-hint {
+    position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    background: rgba(14,15,17,0.88); border: 1px solid var(--border);
+    border-radius: 20px; padding: 6px 14px;
+    font-size: 11px; font-family: 'DM Mono', monospace; color: var(--text-muted);
+    z-index: 1000; pointer-events: none; backdrop-filter: blur(6px); white-space: nowrap;
+  }
+
+  .pin-mode-toggle {
+    position: absolute; top: 10px; right: 10px; z-index: 1000;
+    display: flex; flex-direction: column; gap: 5px;
+  }
+  .pin-btn {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 7px; color: var(--text-muted); cursor: pointer;
+    padding: 7px 10px; font-size: 11px; font-family: 'DM Mono', monospace;
+    transition: all 0.15s; white-space: nowrap;
+  }
+  .pin-btn:hover { border-color: var(--accent-dim); color: var(--text); }
+  .pin-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(200,240,96,0.06); }
+
+  /* ── Map marker dots ── */
+  .dot-start { width:14px;height:14px;background:#c8f060;border:2px solid #0e0f11;border-radius:50%;box-shadow:0 0 0 3px rgba(200,240,96,0.25); }
+  .dot-end   { width:14px;height:14px;background:#ff5a5a;border:2px solid #0e0f11;border-radius:50%;box-shadow:0 0 0 3px rgba(255,90,90,0.25); }
+  .dot-turn  { width:13px;height:13px;background:#a060f0;border:2px solid #0e0f11;border-radius:50%;box-shadow:0 0 0 3px rgba(160,96,240,0.25); }
+  .dot-via   { width:10px;height:10px;background:#f0a030;border:2px solid #0e0f11;border-radius:50%;box-shadow:0 0 0 2px rgba(240,160,48,0.2); }
+</style>
+</head>
+<body>
+
+<header>
+  <span style="font-size:22px">🏍</span>
+  <h1>Moto Route Planner</h1>
+  <span class="tagline">OSM · Overpass · GPX</span>
+</header>
+
+<div class="app">
+  <div class="sidebar">
+
+    <!-- Mode tabs -->
+    <div class="mode-tabs">
+      <button class="mode-tab active" id="tab-p2p">↗ Point to Point</button>
+      <button class="mode-tab" id="tab-round">🔄 Roundtrip</button>
+    </div>
+
+    <!-- ══ POINT TO POINT panel ══ -->
+    <div id="panel-p2p">
+      <div class="section-label">Waypoints</div>
+      <div style="position:relative;padding-left:14px;">
+        <div class="waypoint-block">
+          <div class="dot start"></div>
+          <div class="wp-label">Start</div>
+          <div class="search-row">
+            <input class="search-input" id="start-input" placeholder="City, street or address…" autocomplete="off">
+            <button class="icon-btn" id="pin-start-btn" title="Pick on map">📍</button>
+          </div>
+          <div id="start-suggestions" class="suggestions"></div>
+          <div class="coord-display" id="start-coord"></div>
+        </div>
+        <div class="connector-line"></div>
+        <div class="waypoint-block">
+          <div class="dot end"></div>
+          <div class="wp-label">End</div>
+          <div class="search-row">
+            <input class="search-input" id="end-input" placeholder="City, street or address…" autocomplete="off">
+            <button class="icon-btn" id="pin-end-btn" title="Pick on map">📍</button>
+          </div>
+          <div id="end-suggestions" class="suggestions"></div>
+          <div class="coord-display" id="end-coord"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ ROUNDTRIP panel ══ -->
+    <div id="panel-round" style="display:none;">
+      <div class="section-label">Start / Home base</div>
+      <div style="position:relative;padding-left:14px;">
+        <div class="waypoint-block">
+          <div class="dot loop"></div>
+          <div class="wp-label">Start &amp; End</div>
+          <div class="search-row">
+            <input class="search-input" id="rt-start-input" placeholder="City, street or address…" autocomplete="off">
+            <button class="icon-btn" id="pin-rt-start-btn" title="Pick on map">📍</button>
+          </div>
+          <div id="rt-start-suggestions" class="suggestions"></div>
+          <div class="coord-display" id="rt-start-coord"></div>
+        </div>
+      </div>
+
+      <div style="margin-top:14px;">
+        <div class="section-label">Target distance</div>
+        <div class="slider-row">
+          <span class="slider-label">50 km</span>
+          <input type="range" id="dist-slider" min="50" max="600" value="150" step="25">
+          <span class="slider-label">600 km</span>
+        </div>
+        <div class="bar-wrap">
+          <span class="bar-label">Distance</span>
+          <div class="mini-bar"><div class="mini-fill fill-dist" id="dist-fill" style="width:19%"></div></div>
+          <span class="slider-value" id="dist-val">150 km</span>
+        </div>
+      </div>
+
+      <div style="margin-top:14px;">
+        <div class="section-label">Outbound direction</div>
+        <div class="compass-wrap">
+          <div class="compass">
+            <div class="compass-ring" id="compass-ring"></div>
+          </div>
+          <div class="compass-label">Click a direction — or 🎲 for random</div>
+          <div class="compass-selected" id="compass-selected">Direction: Random 🎲</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Surface — shared -->
+    <div>
+      <div class="section-label">Surface preference</div>
+      <div class="slider-row">
+        <span class="slider-label">🛣️ Paved</span>
+        <input type="range" id="gravel-slider" min="0" max="100" value="20" step="10">
+        <span class="slider-label">🪨 Gravel</span>
+      </div>
+      <div class="bar-wrap">
+        <span class="bar-label">Gravel</span>
+        <div class="mini-bar"><div class="mini-fill fill-gravel" id="surface-fill" style="width:20%"></div></div>
+        <span class="slider-value" id="gravel-val">20%</span>
+      </div>
+      <div id="surface-hint" style="margin-top:5px;font-size:10px;font-family:'DM Mono',monospace;color:var(--text-dim);"></div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Highway allowance — shared -->
+    <div>
+      <div class="section-label">Highway allowance</div>
+      <div class="slider-row">
+        <span class="slider-label">🚫 None</span>
+        <input type="range" id="highway-slider" min="0" max="100" value="30" step="10">
+        <span class="slider-label">✅ All ok</span>
+      </div>
+      <div class="bar-wrap">
+        <span class="bar-label">Highways</span>
+        <div class="mini-bar"><div class="mini-fill" id="highway-fill" style="width:30%;background:#f0a030;"></div></div>
+        <span class="slider-value" id="highway-val">30%</span>
+      </div>
+      <div id="highway-hint" style="margin-top:5px;font-size:10px;font-family:DM Mono,monospace;color:var(--text-dim);"></div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Route style — shared -->
+    <div>
+      <div class="section-label">Route style</div>
+      <div class="style-scroll" id="style-cards"></div>
+      <div id="style-desc" style="margin-top:7px;font-size:11px;font-family:'DM Mono',monospace;color:var(--text-muted);line-height:1.5;min-height:30px;"></div>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Stats -->
+    <div id="route-stats" class="route-stats" style="display:none;">
+      <div class="stat-box">
+        <div class="stat-label">Distance</div>
+        <div class="stat-value" id="stat-dist">—</div>
+        <div class="stat-unit">km</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-label">Est. time</div>
+        <div class="stat-value" id="stat-time">—</div>
+        <div class="stat-unit">hours</div>
+      </div>
+    </div>
+
+    <!-- Status -->
+    <div id="status-bar" class="status-bar">
+      <div class="spinner" id="spinner"></div>
+      <span id="status-text"></span>
+    </div>
+
+    <button class="generate-btn" id="generate-btn">Calculate Route</button>
+    <button class="download-btn" id="download-btn" style="display:none;">⬇ Download GPX</button>
+
+  </div>
+
+  <!-- MAP -->
+  <div style="position:relative;height:100%;">
+    <div id="map"></div>
+    <div class="map-hint" id="map-hint">Activate 📍 to place a pin on the map</div>
+    <div class="pin-mode-toggle" id="pin-toggle-p2p">
+      <button class="pin-btn" id="map-pin-start">📍 Set start</button>
+      <button class="pin-btn" id="map-pin-end">📍 Set end</button>
+    </div>
+    <div class="pin-mode-toggle" id="pin-toggle-rt" style="display:none;">
+      <button class="pin-btn" id="map-pin-rt-start">📍 Set start</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ═══════════════════════════════════════════════════════════════════════
+// ROUTE STYLE DEFINITIONS — add new styles here, UI auto-updates
+// ═══════════════════════════════════════════════════════════════════════
+const ROUTE_STYLES = {
+
+  fastest: {
+    icon: '🚀', name: 'Fastest', desc: 'Direct · all roads',
+    detail: 'Shortest travel time. Uses all road types. No detour logic — pure A→B.',
+    waypointCount: 0, waypointBias: 0, overpassQuery: null,
+  },
+
+  scenic: {
+    icon: '🌄', name: 'Scenic', desc: 'Parks · forests · nature',
+    detail: 'Routes through nature reserves, national parks, and forests. Injects waypoints through green areas.',
+    waypointCount: 4, waypointBias: 0.35,
+    overpassQuery: (bbox) => `
+[out:json][timeout:25];
+(
+  way["leisure"="nature_reserve"]["highway"~"^(unclassified|tertiary|secondary|track)$"](${bbox});
+  way["boundary"="national_park"]["highway"~"^(unclassified|tertiary|secondary)$"](${bbox});
+  way["landuse"="forest"]["highway"~"^(unclassified|tertiary|track)$"](${bbox});
+  way["natural"="wood"]["highway"~"^(unclassified|tertiary)$"](${bbox});
+  way["highway"~"^(unclassified|tertiary)$"]["scenic"="yes"](${bbox});
+  way["route"="scenic"](${bbox});
+);
+out center;`,
+  },
+
+  twisty: {
+    icon: '🌀', name: 'Twisty', desc: 'Curves · bends · no highways',
+    detail: 'Maximises turns and bends. Seeks unclassified and tertiary roads. Avoids straight main roads.',
+    waypointCount: 5, waypointBias: 0.45,
+    overpassQuery: (bbox) => `
+[out:json][timeout:25];
+(
+  way["highway"="unclassified"](${bbox});
+  way["highway"="tertiary"](${bbox});
+  way["highway"="secondary"]["maxspeed"!~"^(80|90|100|110|120|130)$"](${bbox});
+  way["highway"="track"]["tracktype"="grade1"](${bbox});
+);
+out center;`,
+  },
+
+  scenic_twisty: {
+    icon: '🏔️', name: 'Scenic & Twisty', desc: 'Nature + curves',
+    detail: 'Routes through parks and forests while maximising bends. Best of both worlds.',
+    waypointCount: 5, waypointBias: 0.4,
+    overpassQuery: (bbox) => `
+[out:json][timeout:25];
+(
+  way["leisure"="nature_reserve"]["highway"~"^(unclassified|tertiary|track)$"](${bbox});
+  way["landuse"="forest"]["highway"~"^(unclassified|tertiary|track)$"](${bbox});
+  way["natural"="wood"]["highway"~"^(unclassified|tertiary)$"](${bbox});
+  way["highway"="unclassified"]["maxspeed"!~"^(80|90|100|110|120|130)$"](${bbox});
+  way["highway"="tertiary"]["maxspeed"!~"^(80|90|100|110|120|130)$"](${bbox});
+  way["highway"="track"]["tracktype"="grade1"](${bbox});
+);
+out center;`,
+  },
+
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// COMPASS DIRECTIONS
+// ═══════════════════════════════════════════════════════════════════════
+const COMPASS_DIRS = [
+  { label: 'N',  deg: 0,    x: 50, y: 8  },
+  { label: 'NE', deg: 45,   x: 82, y: 18 },
+  { label: 'E',  deg: 90,   x: 92, y: 50 },
+  { label: 'SE', deg: 135,  x: 82, y: 82 },
+  { label: 'S',  deg: 180,  x: 50, y: 92 },
+  { label: 'SW', deg: 225,  x: 18, y: 82 },
+  { label: 'W',  deg: 270,  x: 8,  y: 50 },
+  { label: 'NW', deg: 315,  x: 18, y: 18 },
+];
+
+// ═══════════════════════════════════════════════════════════════════════
+// APP STATE
+// ═══════════════════════════════════════════════════════════════════════
+const state = {
+  mode: 'p2p',          // 'p2p' | 'round'
+  start:    null,       // { lat, lon, label }
+  end:      null,
+  rtStart:  null,       // roundtrip start (= end)
+  gravelPct: 20,
+  highwayPct: 30,   // 0 = no highways, 100 = fully allowed
+  styleKey: 'fastest',
+  pinMode:  null,
+  targetKm: 150,
+  bearingDeg: null,     // null = random
+  layers: { route: null, start: null, end: null, rtStart: null, turn: null, via: [] },
+  gpxContent: null,
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// MAP
+// ═══════════════════════════════════════════════════════════════════════
+const map = L.map('map', { zoomControl: true }).setView([52.0, 5.3], 8);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© <a href="https://openstreetmap.org">OpenStreetMap</a> contributors',
+  maxZoom: 19,
+}).addTo(map);
+
+const mkIcon = (cls, size) => L.divIcon({
+  html: `<div class="${cls}"></div>`,
+  iconAnchor: [size/2, size/2], className: '',
+});
+const ICONS = {
+  start:   mkIcon('dot-start', 14),
+  end:     mkIcon('dot-end',   14),
+  rtStart: mkIcon('dot-start', 14),
+  turn:    mkIcon('dot-turn',  13),
+  via:     mkIcon('dot-via',   10),
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// MODE TABS
+// ═══════════════════════════════════════════════════════════════════════
+document.getElementById('tab-p2p').addEventListener('click', () => setMode('p2p'));
+document.getElementById('tab-round').addEventListener('click', () => setMode('round'));
+
+function setMode(mode) {
+  state.mode = mode;
+  document.getElementById('tab-p2p').classList.toggle('active', mode === 'p2p');
+  document.getElementById('tab-round').classList.toggle('active', mode === 'round');
+  document.getElementById('panel-p2p').style.display   = mode === 'p2p'   ? '' : 'none';
+  document.getElementById('panel-round').style.display = mode === 'round' ? '' : 'none';
+  document.getElementById('pin-toggle-p2p').style.display = mode === 'p2p'   ? '' : 'none';
+  document.getElementById('pin-toggle-rt').style.display  = mode === 'round' ? '' : 'none';
+  clearRouteLayers();
+  document.getElementById('route-stats').style.display  = 'none';
+  document.getElementById('download-btn').style.display = 'none';
+  document.getElementById('status-bar').className       = 'status-bar';
+  state.gpxContent = null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// BUILD STYLE CARDS
+// ═══════════════════════════════════════════════════════════════════════
+(function buildStyleCards() {
+  const container = document.getElementById('style-cards');
+  Object.entries(ROUTE_STYLES).forEach(([key, style]) => {
+    const card = document.createElement('div');
+    card.className = 'type-card' + (key === state.styleKey ? ' active' : '');
+    card.dataset.key = key;
+    card.innerHTML = `
+      <div class="type-icon">${style.icon}</div>
+      <div class="type-name">${style.name}</div>
+      <div class="type-desc">${style.desc}</div>`;
+    card.addEventListener('click', () => {
+      state.styleKey = key;
+      document.querySelectorAll('.type-card').forEach(c => c.classList.remove('active'));
+      card.classList.add('active');
+      document.getElementById('style-desc').textContent = ROUTE_STYLES[key].detail;
+    });
+    container.appendChild(card);
+  });
+  document.getElementById('style-desc').textContent = ROUTE_STYLES[state.styleKey].detail;
+})();
+
+// ═══════════════════════════════════════════════════════════════════════
+// BUILD COMPASS ROSE
+// ═══════════════════════════════════════════════════════════════════════
+(function buildCompass() {
+  const ring = document.getElementById('compass-ring');
+
+  // Random center button
+  const randBtn = document.createElement('div');
+  randBtn.className = 'compass-dir random-btn';
+  randBtn.textContent = '🎲';
+  randBtn.title = 'Random direction';
+  randBtn.style.left = '50%';
+  randBtn.style.top  = '50%';
+  randBtn.addEventListener('click', () => {
+    state.bearingDeg = null;
+    document.querySelectorAll('.compass-dir:not(.random-btn)').forEach(b => b.classList.remove('active'));
+    document.getElementById('compass-selected').textContent = 'Direction: Random 🎲';
+  });
+  ring.appendChild(randBtn);
+
+  COMPASS_DIRS.forEach(dir => {
+    const btn = document.createElement('div');
+    btn.className = 'compass-dir';
+    btn.textContent = dir.label;
+    btn.style.left = dir.x + '%';
+    btn.style.top  = dir.y + '%';
+    btn.addEventListener('click', () => {
+      state.bearingDeg = dir.deg;
+      document.querySelectorAll('.compass-dir:not(.random-btn)').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('compass-selected').textContent = `Direction: ${dir.label} (${dir.deg}°)`;
+    });
+    ring.appendChild(btn);
+  });
+})();
+
+// ═══════════════════════════════════════════════════════════════════════
+// SLIDERS
+// ═══════════════════════════════════════════════════════════════════════
+document.getElementById('gravel-slider').addEventListener('input', function () {
+  state.gravelPct = parseInt(this.value);
+  document.getElementById('gravel-val').textContent   = this.value + '%';
+  document.getElementById('surface-fill').style.width = this.value + '%';
+  document.getElementById('surface-hint').textContent  = surfaceHint(state.gravelPct);
+});
+document.getElementById('surface-hint').textContent = surfaceHint(20);
+
+document.getElementById('highway-slider').addEventListener('input', function () {
+  state.highwayPct = parseInt(this.value);
+  document.getElementById('highway-val').textContent   = this.value + '%';
+  document.getElementById('highway-fill').style.width  = this.value + '%';
+  document.getElementById('highway-hint').textContent  = highwayHint(state.highwayPct);
+});
+document.getElementById('highway-hint').textContent = highwayHint(30);
+
+document.getElementById('dist-slider').addEventListener('input', function () {
+  state.targetKm = parseInt(this.value);
+  document.getElementById('dist-val').textContent = this.value + ' km';
+  const pct = ((this.value - 50) / 550) * 100;
+  document.getElementById('dist-fill').style.width = pct + '%';
+});
+
+function surfaceHint(pct) {
+  if (pct <=  10) return 'Tarmac / paved roads only';
+  if (pct <=  30) return 'Mostly paved, some gravel ok';
+  if (pct <=  50) return 'Mixed — paved & gravel roads';
+  if (pct <=  70) return 'Prefer gravel & rural tracks';
+  if (pct <=  90) return 'Mostly gravel, unpaved tracks';
+  return 'Forest roads & unpaved public tracks';
+}
+
+function highwayHint(pct) {
+  if (pct ===   0) return "No highways or motorways at all";
+  if (pct <=  20) return "Highways avoided — small roads only";
+  if (pct <=  40) return "Mostly small roads, minimal highway";
+  if (pct <=  60) return "Mix of small roads and some highway";
+  if (pct <=  80) return "Highways allowed for longer stretches";
+  return "Highways fully allowed";
+}
+
+// Returns extra Overpass filter clause to append when highways should be avoided
+function highwayAvoidClause(bbox) {
+  return `
+  way["highway"~"^(unclassified|tertiary|secondary)$"](${bbox});
+  way["highway"="primary"]["maxspeed"!~"^(100|110|120|130)$"](${bbox});`;
+}
+
+// Returns whether the highway% warrants injecting highway-avoiding waypoints
+function shouldAvoidHighways() { return state.highwayPct < 50; }
+
+function gravelOverpassClause(bbox) {
+  return `
+  way["highway"~"^(unclassified|tertiary|track)$"]["surface"~"^(gravel|unpaved|fine_gravel|dirt|ground|compacted)$"](${bbox});
+  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GEOCODING
+// ═══════════════════════════════════════════════════════════════════════
+function setCoord(which, lat, lon, label) {
+  state[which] = { lat, lon, label };
+  const coordEl = document.getElementById(which === 'rtStart' ? 'rt-start-coord' : `${which}-coord`);
+  if (coordEl) coordEl.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+
+  const inputEl = document.getElementById(which === 'rtStart' ? 'rt-start-input' : `${which}-input`);
+  if (inputEl && label) inputEl.value = label;
+
+  if (state.layers[which]) map.removeLayer(state.layers[which]);
+  state.layers[which] = L.marker([lat, lon], { icon: ICONS[which] || ICONS.start }).addTo(map);
+  map.setView([lat, lon], Math.max(map.getZoom(), 9));
+}
+
+let debounce;
+function setupSearch(inputId, suggestId, which) {
+  const input   = document.getElementById(inputId);
+  const suggest = document.getElementById(suggestId);
+  if (!input || !suggest) return;
+
+  input.addEventListener('input', () => {
+    clearTimeout(debounce);
+    const q = input.value.trim();
+    if (q.length < 3) { suggest.style.display = 'none'; return; }
+    debounce = setTimeout(() => nominatimSearch(q, suggest, which), 420);
+  });
+  document.addEventListener('click', e => {
+    if (!input.contains(e.target) && !suggest.contains(e.target))
+      suggest.style.display = 'none';
+  });
+}
+
+async function nominatimSearch(q, box, which) {
+  try {
+    const res  = await fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=5`,
+      { headers: { 'User-Agent': 'MotoRoutePlannerGPX/2.0' } }
+    );
+    const data = await res.json();
+    box.innerHTML = '';
+    if (!data.length) {
+      box.innerHTML = '<div class="suggestion-item" style="color:var(--text-dim)">No results</div>';
+    } else {
+      data.forEach(item => {
+        const el = document.createElement('div');
+        el.className = 'suggestion-item';
+        el.textContent = item.display_name;
+        el.addEventListener('click', () => {
+          setCoord(which, parseFloat(item.lat), parseFloat(item.lon),
+            item.display_name.split(',').slice(0, 2).join(',').trim());
+          box.style.display = 'none';
+        });
+        box.appendChild(el);
+      });
+    }
+    box.style.display = 'block';
+  } catch {
+    box.innerHTML = '<div class="suggestion-item" style="color:var(--danger)">Search error</div>';
+    box.style.display = 'block';
+  }
+}
+
+setupSearch('start-input',    'start-suggestions',    'start');
+setupSearch('end-input',      'end-suggestions',      'end');
+setupSearch('rt-start-input', 'rt-start-suggestions', 'rtStart');
+
+// ═══════════════════════════════════════════════════════════════════════
+// PIN MODE
+// ═══════════════════════════════════════════════════════════════════════
+function setPinMode(mode) {
+  state.pinMode = mode;
+  ['start','end','rt-start'].forEach(w => {
+    const btn = document.getElementById(`map-pin-${w}`);
+    if (btn) btn.classList.toggle('active', mode === w);
+  });
+  document.getElementById('map-hint').textContent = mode
+    ? `Click the map to set the ${mode.replace('-',' ')} point`
+    : 'Activate 📍 to place a pin on the map';
+  map.getContainer().style.cursor = mode ? 'crosshair' : '';
+}
+
+['start','end'].forEach(w => {
+  document.getElementById(`pin-${w}-btn`)?.addEventListener('click',
+    () => setPinMode(state.pinMode === w ? null : w));
+  document.getElementById(`map-pin-${w}`)?.addEventListener('click',
+    () => setPinMode(state.pinMode === w ? null : w));
+});
+document.getElementById('pin-rt-start-btn')?.addEventListener('click',
+  () => setPinMode(state.pinMode === 'rt-start' ? null : 'rt-start'));
+document.getElementById('map-pin-rt-start')?.addEventListener('click',
+  () => setPinMode(state.pinMode === 'rt-start' ? null : 'rt-start'));
+
+map.on('click', async e => {
+  if (!state.pinMode) return;
+  const { lat, lng } = e.latlng;
+  const pinMode = state.pinMode;
+  const which   = pinMode === 'rt-start' ? 'rtStart' : pinMode;
+  setPinMode(null);
+  try {
+    const res  = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
+      { headers: { 'User-Agent': 'MotoRoutePlannerGPX/2.0' } }
+    );
+    const data = await res.json();
+    const label = data.display_name
+      ? data.display_name.split(',').slice(0, 2).join(',').trim()
+      : `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    setCoord(which, lat, lng, label);
+  } catch {
+    setCoord(which, lat, lng, `${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// STATUS
+// ═══════════════════════════════════════════════════════════════════════
+function showStatus(msg, type = 'loading') {
+  const bar = document.getElementById('status-bar');
+  bar.className = 'status-bar visible' + (type !== 'loading' ? ` ${type}` : '');
+  document.getElementById('spinner').style.display   = type === 'loading' ? 'inline-block' : 'none';
+  document.getElementById('status-text').textContent = msg;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GEO HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+const DEG2RAD = Math.PI / 180;
+const RAD2DEG = 180 / Math.PI;
+const EARTH_KM = 6371;
+
+function buildBbox(s, e, padFactor) {
+  const latMin = Math.min(s.lat, e.lat);
+  const latMax = Math.max(s.lat, e.lat);
+  const lonMin = Math.min(s.lon, e.lon);
+  const lonMax = Math.max(s.lon, e.lon);
+  const dLat   = Math.max((latMax - latMin) * padFactor, 0.06);
+  const dLon   = Math.max((lonMax - lonMin) * padFactor, 0.06);
+  return `${(latMin-dLat).toFixed(5)},${(lonMin-dLon).toFixed(5)},${(latMax+dLat).toFixed(5)},${(lonMax+dLon).toFixed(5)}`;
+}
+
+// Project a point `distKm` km from origin at `bearingDeg`
+function projectPoint(lat, lon, bearingDeg, distKm) {
+  const φ1 = lat * DEG2RAD;
+  const λ1 = lon * DEG2RAD;
+  const θ  = bearingDeg * DEG2RAD;
+  const δ  = distKm / EARTH_KM;
+
+  const φ2 = Math.asin(
+    Math.sin(φ1) * Math.cos(δ) +
+    Math.cos(φ1) * Math.sin(δ) * Math.cos(θ)
+  );
+  const λ2 = λ1 + Math.atan2(
+    Math.sin(θ) * Math.sin(δ) * Math.cos(φ1),
+    Math.cos(δ) - Math.sin(φ1) * Math.sin(φ2)
+  );
+  return { lat: φ2 * RAD2DEG, lon: λ2 * RAD2DEG };
+}
+
+// Build bounding box that contains both start and turn point with padding
+function buildRoundtripBbox(origin, turnPt, padFactor) {
+  return buildBbox(
+    { lat: Math.min(origin.lat, turnPt.lat), lon: Math.min(origin.lon, turnPt.lon) },
+    { lat: Math.max(origin.lat, turnPt.lat), lon: Math.max(origin.lon, turnPt.lon) },
+    padFactor
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// OVERPASS
+// ═══════════════════════════════════════════════════════════════════════
+async function runOverpass(ql) {
+  const res = await fetch('https://overpass-api.de/api/interpreter', {
+    method: 'POST', body: ql,
+    headers: { 'Content-Type': 'text/plain' },
+  });
+  if (!res.ok) throw new Error('Overpass error ' + res.status);
+  return res.json();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// WAYPOINT SELECTION
+// ═══════════════════════════════════════════════════════════════════════
+function selectWaypoints(elements, start, end, count, bias) {
+  if (!elements?.length || count === 0) return [];
+
+  const pts = elements
+    .filter(el => el.center || (el.lat && el.lon))
+    .map(el => ({ lat: el.center?.lat ?? el.lat, lon: el.center?.lon ?? el.lon }));
+  if (!pts.length) return [];
+
+  const dLat = end.lat - start.lat;
+  const dLon = end.lon - start.lon;
+  const len  = Math.sqrt(dLat * dLat + dLon * dLon) || 1;
+  const pLat = -dLon / len;
+  const pLon =  dLat / len;
+
+  const selected = [];
+  for (let i = 1; i <= count; i++) {
+    const t    = i / (count + 1);
+    const mLat = start.lat + dLat * t;
+    const mLon = start.lon + dLon * t;
+
+    let best = null, bestDist = Infinity;
+    for (const p of pts) {
+      if (selected.some(s =>
+        Math.abs(s._sLat - p.lat) < 0.01 &&
+        Math.abs(s._sLon - p.lon) < 0.01)) continue;
+      const d = (p.lat - mLat) ** 2 + (p.lon - mLon) ** 2;
+      if (d < bestDist) { bestDist = d; best = p; }
+    }
+    if (best) {
+      const side = (i % 2 === 0) ? 1 : -1;
+      selected.push({
+        lat: best.lat + pLat * bias * len * side,
+        lon: best.lon + pLon * bias * len * side,
+        _sLat: best.lat, _sLon: best.lon,
+      });
+    }
+  }
+  return selected;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// OSRM
+// ═══════════════════════════════════════════════════════════════════════
+async function osrmRoute(waypoints) {
+  const coords = waypoints.map(w => `${w.lon},${w.lat}`).join(';');
+  const url    = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
+  const res    = await fetch(url);
+  const data   = await res.json();
+  if (data.code !== 'Ok' || !data.routes.length)
+    throw new Error(data.message || 'OSRM: no route found');
+  return data.routes[0];
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// OVERPASS QUERY HELPER (with optional gravel injection)
+// ═══════════════════════════════════════════════════════════════════════
+async function queryOverpass(style, bbox) {
+  if (!style.overpassQuery || style.waypointCount === 0) return { elements: [] };
+
+  let ql = style.overpassQuery(bbox);
+  // Inject gravel-seeking roads when surface preference is high
+  if (state.gravelPct >= 60) {
+    ql = ql.replace(/\);\s*out center;/, `${gravelOverpassClause(bbox)}\n);\nout center;`);
+  }
+  // Inject small-road preference when highway allowance is low
+  if (shouldAvoidHighways() && style.waypointCount > 0) {
+    ql = ql.replace(/\);\s*out center;/, `${highwayAvoidClause(bbox)}\n);\nout center;`);
+  }
+  try {
+    return await runOverpass(ql);
+  } catch {
+    return { elements: [] };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GPX BUILDER
+// ═══════════════════════════════════════════════════════════════════════
+function xmlEsc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function buildGPX({ name, desc, startPt, endPt, coords, viaPoints, isRoundtrip }) {
+  const now    = new Date().toISOString();
+  const trkpts = coords.map(([lon, lat]) =>
+    `    <trkpt lat="${lat.toFixed(7)}" lon="${lon.toFixed(7)}"></trkpt>`
+  ).join('\n');
+
+  const viaWpts = viaPoints.map((wp, i) => `
+  <wpt lat="${wp.lat.toFixed(7)}" lon="${wp.lon.toFixed(7)}">
+    <name>Via ${i + 1}</name><sym>Waypoint</sym><type>via</type>
+  </wpt>`).join('');
+
+  const endWpt = isRoundtrip ? '' : `
+  <wpt lat="${endPt.lat.toFixed(7)}" lon="${endPt.lon.toFixed(7)}">
+    <name>End: ${xmlEsc(endPt.label || 'End')}</name>
+    <sym>Flag, Red</sym><type>end</type>
+  </wpt>`;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="MotoRoutePlannerGPX"
+  xmlns="http://www.topografix.com/GPX/1/1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">
+  <metadata>
+    <name>${xmlEsc(name)}</name>
+    <desc>${xmlEsc(desc)}</desc>
+    <time>${now}</time>
+  </metadata>
+  <wpt lat="${startPt.lat.toFixed(7)}" lon="${startPt.lon.toFixed(7)}">
+    <name>${isRoundtrip ? 'Start/End: ' : 'Start: '}${xmlEsc(startPt.label || 'Start')}</name>
+    <sym>Flag, Green</sym><type>start</type>
+  </wpt>${viaWpts}${endWpt}
+  <trk>
+    <name>${xmlEsc(name)}</name>
+    <type>Motorcycling</type>
+    <trkseg>
+${trkpts}
+    </trkseg>
+  </trk>
+</gpx>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CLEAR MAP LAYERS
+// ═══════════════════════════════════════════════════════════════════════
+function clearRouteLayers() {
+  if (state.layers.route) { map.removeLayer(state.layers.route); state.layers.route = null; }
+  if (state.layers.turn)  { map.removeLayer(state.layers.turn);  state.layers.turn  = null; }
+  state.layers.via.forEach(l => map.removeLayer(l));
+  state.layers.via = [];
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MAIN: POINT-TO-POINT ROUTE
+// ═══════════════════════════════════════════════════════════════════════
+async function calculateP2P() {
+  if (!state.start || !state.end) {
+    showStatus('Set both start and end points first.', 'error'); return;
+  }
+
+  const style = ROUTE_STYLES[state.styleKey];
+  let viaPoints = [];
+
+  // Step 1: Overpass
+  if (style.waypointCount > 0) {
+    showStatus(`[1/3] Querying OSM for ${style.name.toLowerCase()} roads…`);
+    const bbox = buildBbox(state.start, state.end, 0.4 + style.waypointBias);
+    const data = await queryOverpass(style, bbox);
+    viaPoints  = selectWaypoints(data.elements, state.start, state.end,
+                                 style.waypointCount, style.waypointBias);
+    showStatus(`[1/3] Found ${viaPoints.length} waypoints ✓`);
+  } else {
+    showStatus('[1/3] Fastest — skipping Overpass ✓');
+  }
+
+  // Step 2: OSRM
+  showStatus(`[2/3] Routing via OSRM (${viaPoints.length} via points)…`);
+  const allWaypoints = [state.start, ...viaPoints, state.end];
+  const route  = await osrmRoute(allWaypoints);
+  const coords = route.geometry.coordinates;
+  const distKm = (route.distance / 1000).toFixed(1);
+  const timeH  = (route.duration / 3600).toFixed(1);
+
+  // Step 3: Draw
+  showStatus('[3/3] Rendering…');
+  state.layers.route = L.polyline(
+    coords.map(c => [c[1], c[0]]),
+    { color: '#c8f060', weight: 4, opacity: 0.88, lineJoin: 'round', lineCap: 'round' }
+  ).addTo(map);
+  viaPoints.forEach(wp => {
+    state.layers.via.push(L.marker([wp.lat, wp.lon], { icon: ICONS.via }).addTo(map));
+  });
+  map.fitBounds(state.layers.route.getBounds(), { padding: [40, 40] });
+
+  showStats(distKm, timeH);
+
+  const name = `${state.start.label || 'Start'} → ${state.end.label || 'End'}`;
+  state.gpxContent = buildGPX({
+    name, isRoundtrip: false,
+    desc: `Motorbike P2P | Style: ${style.name} | Surface: ${state.gravelPct}% gravel | Highways: ${state.highwayPct}% | ${distKm} km · ~${timeH} h`,
+    startPt: state.start, endPt: state.end,
+    coords, viaPoints,
+  });
+
+  showStatus(`Done — ${distKm} km · ~${timeH} h · ${style.name}` +
+    (viaPoints.length ? ` · ${viaPoints.length} via points` : ''), 'success');
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MAIN: ROUNDTRIP ROUTE
+// Two legs: Start → TurnPoint and TurnPoint → Start
+// Both legs share the same Overpass results for their corridor
+// ═══════════════════════════════════════════════════════════════════════
+async function calculateRoundtrip() {
+  if (!state.rtStart) {
+    showStatus('Set a start/home location first.', 'error'); return;
+  }
+
+  const style    = ROUTE_STYLES[state.styleKey];
+  const origin   = state.rtStart;
+
+  // Choose bearing: selected or random
+  const bearing  = state.bearingDeg !== null
+    ? state.bearingDeg
+    : Math.random() * 360;
+  const bearingLabel = state.bearingDeg !== null
+    ? COMPASS_DIRS.find(d => d.deg === state.bearingDeg)?.label || `${state.bearingDeg}°`
+    : `random (${Math.round(bearing)}°)`;
+
+  // Turn point is half the target distance away in the chosen direction
+  // (outbound + return ≈ targetKm, so leg length ≈ targetKm/2)
+  const legKm    = state.targetKm / 2;
+  const turnPt   = projectPoint(origin.lat, origin.lon, bearing, legKm);
+
+  showStatus(`[1/4] Turn point projected ${Math.round(legKm)} km ${bearingLabel}…`);
+
+  // Show turn marker immediately
+  if (state.layers.turn) map.removeLayer(state.layers.turn);
+  state.layers.turn = L.marker([turnPt.lat, turnPt.lon], { icon: ICONS.turn })
+    .bindTooltip('Turnaround point', { permanent: false })
+    .addTo(map);
+
+  let viaOut = [], viaBack = [];
+
+  // Step 2: Overpass for both legs
+  if (style.waypointCount > 0) {
+    showStatus(`[2/4] Querying OSM for ${style.name.toLowerCase()} roads…`);
+
+    const padFactor = 0.4 + style.waypointBias;
+
+    // Outbound corridor: origin → turnPt
+    const bboxOut  = buildRoundtripBbox(origin, turnPt, padFactor);
+    const dataOut  = await queryOverpass(style, bboxOut);
+    viaOut = selectWaypoints(dataOut.elements, origin, turnPt,
+                             Math.ceil(style.waypointCount / 2), style.waypointBias);
+
+    // Return corridor: turnPt → origin (perpendicular bias flips automatically)
+    const dataBack = await queryOverpass(style, bboxOut); // same bbox, different selection
+    viaBack = selectWaypoints(dataBack.elements, turnPt, origin,
+                              Math.floor(style.waypointCount / 2), style.waypointBias);
+
+    showStatus(`[2/4] Overpass: ${viaOut.length + viaBack.length} total waypoints ✓`);
+  } else {
+    showStatus('[2/4] Fastest — no Overpass query ✓');
+  }
+
+  // Step 3: OSRM — two legs
+  showStatus('[3/4] Routing outbound leg…');
+  const legOut  = await osrmRoute([origin, ...viaOut, turnPt]);
+
+  showStatus('[3/4] Routing return leg…');
+  const legBack = await osrmRoute([turnPt, ...viaBack, origin]);
+
+  // Merge geometry — drop first point of legBack (= duplicate turn point)
+  const coordsOut  = legOut.geometry.coordinates;
+  const coordsBack = legBack.geometry.coordinates.slice(1);
+  const allCoords  = [...coordsOut, ...coordsBack];
+
+  const totalDist  = ((legOut.distance + legBack.distance) / 1000).toFixed(1);
+  const totalTime  = ((legOut.duration + legBack.duration) / 3600).toFixed(1);
+
+  // Step 4: Draw
+  showStatus('[4/4] Rendering roundtrip…');
+
+  // Draw outbound in accent, return in slightly dimmer color
+  const outLatLngs  = coordsOut.map(c => [c[1], c[0]]);
+  const backLatLngs = coordsBack.map(c => [c[1], c[0]]);
+
+  // Draw as one polyline for GPX, but two for visual distinction
+  state.layers.route = L.layerGroup([
+    L.polyline(outLatLngs,  { color: '#c8f060', weight: 4, opacity: 0.9,  lineJoin: 'round' }),
+    L.polyline(backLatLngs, { color: '#90c020', weight: 4, opacity: 0.75, lineJoin: 'round', dashArray: '8,4' }),
+  ]).addTo(map);
+
+  [...viaOut, ...viaBack].forEach(wp => {
+    state.layers.via.push(L.marker([wp.lat, wp.lon], { icon: ICONS.via }).addTo(map));
+  });
+
+  // Fit map to full route
+  const allLatLngs = allCoords.map(c => [c[1], c[0]]);
+  map.fitBounds(L.latLngBounds(allLatLngs), { padding: [40, 40] });
+
+  showStats(totalDist, totalTime);
+
+  const allVia = [...viaOut, ...viaBack];
+  const name   = `Roundtrip from ${origin.label || 'Home'}`;
+  state.gpxContent = buildGPX({
+    name, isRoundtrip: true,
+    desc: `Motorbike roundtrip | Style: ${style.name} | Direction: ${bearingLabel} | Surface: ${state.gravelPct}% gravel | Highways: ${state.highwayPct}% | ${totalDist} km · ~${totalTime} h`,
+    startPt: origin, endPt: origin,
+    coords: allCoords, viaPoints: allVia,
+  });
+
+  showStatus(
+    `Done — ${totalDist} km · ~${totalTime} h · ${style.name} · heading ${bearingLabel}`,
+    'success'
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SHARED HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+function showStats(distKm, timeH) {
+  document.getElementById('stat-dist').textContent = distKm;
+  document.getElementById('stat-time').textContent = timeH;
+  document.getElementById('route-stats').style.display = 'grid';
+  document.getElementById('download-btn').style.display = 'block';
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CALCULATE BUTTON
+// ═══════════════════════════════════════════════════════════════════════
+async function onCalculate() {
+  const btn = document.getElementById('generate-btn');
+  btn.disabled = true;
+  document.getElementById('download-btn').style.display = 'none';
+  document.getElementById('route-stats').style.display  = 'none';
+  clearRouteLayers();
+  state.gpxContent = null;
+
+  try {
+    if (state.mode === 'p2p') {
+      await calculateP2P();
+    } else {
+      await calculateRoundtrip();
+    }
+  } catch (err) {
+    showStatus(`Error: ${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('generate-btn').addEventListener('click', onCalculate);
+
+// ═══════════════════════════════════════════════════════════════════════
+// DOWNLOAD GPX
+// ═══════════════════════════════════════════════════════════════════════
+document.getElementById('download-btn').addEventListener('click', () => {
+  if (!state.gpxContent) return;
+  const blob = new Blob([state.gpxContent], { type: 'application/gpx+xml' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  const base = state.mode === 'round'
+    ? (state.rtStart?.label || 'roundtrip').replace(/[^a-z0-9]/gi,'_').slice(0,20)
+    : (state.start?.label  || 'start'    ).replace(/[^a-z0-9]/gi,'_').slice(0,16)
+      + '_to_'
+      + (state.end?.label  || 'end'      ).replace(/[^a-z0-9]/gi,'_').slice(0,16);
+  a.download = `moto_${state.styleKey}_${base}.gpx`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>
