@@ -572,6 +572,13 @@
       <span id="status-text"></span>
     </div>
 
+    <!-- Status log — shows all steps permanently -->
+    <div id="status-log" style="
+      background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+      padding:8px 10px;font-family:'DM Mono',monospace;max-height:120px;overflow-y:auto;
+      display:none;
+    "></div>
+
     <button class="generate-btn" id="generate-btn">Calculate Route</button>
     <button class="download-btn" id="download-btn" style="display:none;">⬇ Download GPX</button>
     <button class="download-btn" id="debug-btn" style="font-size:11px;padding:8px;">🔍 Test Overpass query</button>
@@ -771,40 +778,40 @@ function buildOverpassQuery(style, bbox) {
   // Scenic and twisty styles additionally bias toward the smallest road types.
 
   if (style.scenicFilter && style.twistyFilter) {
-    return `[out:json][timeout:25];
+    return `[out:json][timeout:60];
 (
   way["highway"~"^(unclassified|track)$"](${bbox});
   way["highway"="tertiary"](${bbox});
 ${types.includes('secondary') ? `  way["highway"="secondary"](${bbox});
 ` : ''}${gravel});
-out center qt;`;
+out center;`;
   }
 
   if (style.scenicFilter) {
-    return `[out:json][timeout:25];
+    return `[out:json][timeout:60];
 (
   way["highway"~"^(unclassified|track)$"](${bbox});
   way["highway"="tertiary"](${bbox});
 ${types.includes('secondary') ? `  way["highway"="secondary"](${bbox});
 ` : ''}${gravel});
-out center qt;`;
+out center;`;
   }
 
   if (style.twistyFilter) {
-    return `[out:json][timeout:25];
+    return `[out:json][timeout:60];
 (
   way["highway"~"^(unclassified|tertiary)$"]${surfRe}(${bbox});
 ${types.includes('secondary') ? `  way["highway"="secondary"]["maxspeed"!~"^(100|110|120|130)$"]${surfRe}(${bbox});
 ` : ''}  way["highway"${hwRe}]${surfRe}(${bbox});
 ${gravel});
-out center qt;`;
+out center;`;
   }
 
-  return `[out:json][timeout:25];
+  return `[out:json][timeout:60];
 (
   way["highway"${hwRe}]${surfRe}(${bbox});
 ${gravel});
-out center qt;`;
+out center;`;
 }
 
 async function runOverpass(ql) {
@@ -818,12 +825,17 @@ async function runOverpass(ql) {
 
 // ═══════════════════════════════════════════════════════════════════════
 // COORDINATE EXTRACTION
-// Overpass "out center qt;" returns a center{lat,lon} for each way.
+// Overpass "out center;" returns a center{lat,lon} for each way.
 // This works for both closed polygons AND linear ways in modern Overpass.
 // We also handle nodes (lat/lon directly on element) as fallback.
 // ═══════════════════════════════════════════════════════════════════════
 function extractPts(elements) {
   const pts = [];
+  // Log first element structure so we can see what Overpass actually returns
+  if (elements.length > 0) {
+    console.log('extractPts — first element:', JSON.stringify(elements[0]));
+    console.log('extractPts — total elements:', elements.length);
+  }
   for (const el of elements) {
     if (el.center?.lat != null && el.center?.lon != null) {
       pts.push({ lat: el.center.lat, lon: el.center.lon });
@@ -831,6 +843,7 @@ function extractPts(elements) {
       pts.push({ lat: el.lat, lon: el.lon });
     }
   }
+  console.log('extractPts — points extracted:', pts.length);
   return pts;
 }
 
@@ -939,46 +952,41 @@ async function buildRoute(from, to, style, statusPrefix) {
     console.log('straight dist:', straightKm.toFixed(1), 'km');
     console.log('query:', ql);
 
-    showStatus(`${statusPrefix} Querying OSM (bbox: ${bbox.split(',').map(n=>parseFloat(n).toFixed(2)).join(',')})…`);
+    logStatus(`Querying Overpass (${Math.round(straightKm)} km route, spacing ${spacing} km)…`);
 
     let elements = [];
     try {
+      const controller = new AbortController();
+      const fetchTimer = setTimeout(() => controller.abort(), 90000); // 90s timeout
       const raw = await fetch('https://overpass-api.de/api/interpreter', {
         method: 'POST', body: ql,
         headers: { 'Content-Type': 'text/plain' },
+        signal: controller.signal,
       });
-      showStatus(`${statusPrefix} Overpass HTTP ${raw.status}…`);
+      clearTimeout(fetchTimer);
+      logStatus(`Overpass HTTP ${raw.status}`);
       if (!raw.ok) {
         const txt = await raw.text();
-        console.error('Overpass error:', raw.status, txt);
-        showStatus(`${statusPrefix} Overpass error ${raw.status}: ${txt.slice(0,120)}`, 'error');
+        logStatus(`Overpass ERROR: ${txt.slice(0, 100)}`);
       } else {
         const data = await raw.json();
         elements = data.elements || [];
-        console.log('Elements returned:', elements.length);
-        console.log('First 3 elements:', JSON.stringify(elements.slice(0,3), null, 2));
+        logStatus(`Overpass returned ${elements.length} road segments`);
       }
     } catch (e) {
-      console.error('Overpass fetch failed:', e);
-      showStatus(`${statusPrefix} Overpass fetch failed: ${e.message}`, 'error');
+      logStatus(`Overpass FAILED: ${e.message}`);
     }
 
-    showStatus(`${statusPrefix} ${elements.length} segments found — extracting coords…`);
     const pts = extractPts(elements);
-    console.log('extractPts result:', pts.length, 'points');
-    console.log('First 3 pts:', pts.slice(0,3));
-
-    const expectedCount = Math.floor(straightKm / spacing);
-    showStatus(`${statusPrefix} ${pts.length} coords extracted — building chain (${expectedCount} waypoints expected)…`);
+    logStatus(`extractPts: ${pts.length} coords from ${elements.length} elements`);
 
     viaPoints = buildWaypointChain(elements, from, to, spacing);
-    console.log('buildWaypointChain result:', viaPoints.length);
+    logStatus(`buildWaypointChain: ${viaPoints.length} waypoints`);
     if (viaPoints.length === 0 && pts.length > 0) {
-      console.log('Trying relaxed chain...');
       viaPoints = buildWaypointChainRelaxed(elements, from, to, spacing);
-      console.log('buildWaypointChainRelaxed result:', viaPoints.length);
+      logStatus(`relaxed fallback: ${viaPoints.length} waypoints`);
     }
-    showStatus(`${statusPrefix} ${viaPoints.length} waypoints placed — routing via OSRM…`);
+    logStatus(`Routing via OSRM with ${viaPoints.length} via points…`);
   } else {
     showStatus(`${statusPrefix} Fastest mode — direct OSRM routing…`);
   }
@@ -1192,6 +1200,27 @@ function showStatus(msg, type = 'loading') {
   bar.className = 'status-bar visible' + (type !== 'loading' ? ` ${type}` : '');
   document.getElementById('spinner').style.display   = type === 'loading' ? 'inline-block' : 'none';
   document.getElementById('status-text').textContent = msg;
+  // Also append to log
+  const log = document.getElementById('status-log');
+  if (log) {
+    const line = document.createElement('div');
+    line.textContent = msg;
+    line.style.cssText = 'font-size:10px;padding:2px 0;border-bottom:1px solid var(--border);';
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
+// Append a line to the status log without changing the main status bar
+function logStatus(msg) {
+  const log = document.getElementById('status-log');
+  if (log) {
+    const line = document.createElement('div');
+    line.textContent = '· ' + msg;
+    line.style.cssText = 'font-size:10px;padding:2px 0;border-bottom:1px solid var(--border);color:var(--text-muted);';
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1484,6 +1513,10 @@ async function onCalculate() {
   btn.disabled = true;
   document.getElementById('download-btn').style.display = 'none';
   document.getElementById('route-stats').style.display  = 'none';
+  // Show and clear the log
+  const logEl = document.getElementById('status-log');
+  logEl.style.display = 'block';
+  logEl.innerHTML = '';
   clearRouteLayers();
   state.gpxContent = null;
   try {
