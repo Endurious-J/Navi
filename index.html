@@ -755,79 +755,56 @@ function buildBbox(a, b, padKm = 10) {
 }
 
 function buildOverpassQuery(style, bbox) {
-  const types = allowedOsmTypes();
-  const hwRe  = `~"^(${types.join('|')})$"`;
-
-  // Gravel surface filter
+  const types  = allowedOsmTypes();
+  const hwRe   = `~"^(${types.join('|')})$"`;
   const surfRe = state.gravelPct >= 60
     ? `["surface"~"^(gravel|unpaved|fine_gravel|dirt|ground|compacted)$"]`
     : '';
+  const gravel = state.gravelPct >= 60
+    ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});
+`
+    : '';
 
-  // In OSM, forests/nature reserves are AREA elements separate from road ways.
-  // Correct Overpass syntax to find roads inside these areas:
-  //   area["landuse"="forest"](bbox) -> .a; way["highway"](area.a);
-  // We collect all scenic area types into one named set first, then query
-  // roads within them. This is efficient and correct.
+  // Simple, robust queries — no area filters which cause 404 errors.
+  // The highway slider already limits road types to small roads (unclassified,
+  // tertiary etc) which naturally run through rural, scenic, and twisty areas.
+  // Scenic and twisty styles additionally bias toward the smallest road types.
 
   if (style.scenicFilter && style.twistyFilter) {
-    // Scenic + Twisty: roads inside nature areas, biased to smallest road types
-    // plus all allowed types as fallback
-    return `[out:json][timeout:30][maxsize:8388608];
+    return `[out:json][timeout:25];
 (
-  area["leisure"="nature_reserve"](${bbox}) -> .nat;
-  area["landuse"="forest"](${bbox})         -> .for;
-  area["natural"="wood"](${bbox})           -> .woo;
-  area["boundary"="national_park"](${bbox}) -> .par;
-  way["highway"~"^(unclassified|tertiary|track)$"](area.nat);
-  way["highway"~"^(unclassified|tertiary|track)$"](area.for);
-  way["highway"~"^(unclassified|tertiary|track)$"](area.woo);
-  way["highway"~"^(unclassified|tertiary|track)$"](area.par);
-  way["highway"~"^(unclassified|tertiary)$"]${surfRe}(${bbox});
-  way["highway"${hwRe}]${surfRe}(${bbox});
-${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
-);
-out center qt 2000;`;
+  way["highway"~"^(unclassified|track)$"](${bbox});
+  way["highway"="tertiary"](${bbox});
+${types.includes('secondary') ? `  way["highway"="secondary"](${bbox});
+` : ''}${gravel});
+out center qt;`;
   }
 
   if (style.scenicFilter) {
-    // Scenic only: prioritise roads through nature areas, fallback to all allowed
-    return `[out:json][timeout:30][maxsize:8388608];
+    return `[out:json][timeout:25];
 (
-  area["leisure"="nature_reserve"](${bbox}) -> .nat;
-  area["landuse"="forest"](${bbox})         -> .for;
-  area["natural"="wood"](${bbox})           -> .woo;
-  area["boundary"="national_park"](${bbox}) -> .par;
-  way["highway"${hwRe}](area.nat);
-  way["highway"${hwRe}](area.for);
-  way["highway"${hwRe}](area.woo);
-  way["highway"${hwRe}](area.par);
-  way["highway"${hwRe}]["route"="scenic"](${bbox});
-  way["highway"${hwRe}]${surfRe}(${bbox});
-${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
-);
-out center qt 2000;`;
+  way["highway"~"^(unclassified|track)$"](${bbox});
+  way["highway"="tertiary"](${bbox});
+${types.includes('secondary') ? `  way["highway"="secondary"](${bbox});
+` : ''}${gravel});
+out center qt;`;
   }
 
   if (style.twistyFilter) {
-    // Twisty: unclassified and tertiary roads — naturally winding in rural areas
-    // Secondary only if highway slider allows it, with low speed limit filter
-    return `[out:json][timeout:30][maxsize:8388608];
+    return `[out:json][timeout:25];
 (
   way["highway"~"^(unclassified|tertiary)$"]${surfRe}(${bbox});
-${types.includes('secondary') ? `  way["highway"="secondary"]["maxspeed"!~"^(100|110|120|130)$"]${surfRe}(${bbox});` : ''}
-  way["highway"${hwRe}]${surfRe}(${bbox});
-${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
-);
-out center qt 2000;`;
+${types.includes('secondary') ? `  way["highway"="secondary"]["maxspeed"!~"^(100|110|120|130)$"]${surfRe}(${bbox});
+` : ''}  way["highway"${hwRe}]${surfRe}(${bbox});
+${gravel});
+out center qt;`;
   }
 
-  // Generic fallback (shouldn't reach here for fastest since spacingKm=null)
-  return `[out:json][timeout:30][maxsize:8388608];
+  return `[out:json][timeout:25];
 (
   way["highway"${hwRe}]${surfRe}(${bbox});
-${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
-);
-out center qt 2000;`;
+${gravel});
+out center qt;`;
 }
 
 async function runOverpass(ql) {
