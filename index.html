@@ -574,6 +574,7 @@
 
     <button class="generate-btn" id="generate-btn">Calculate Route</button>
     <button class="download-btn" id="download-btn" style="display:none;">⬇ Download GPX</button>
+    <button class="download-btn" id="debug-btn" style="font-size:11px;padding:8px;">🔍 Test Overpass query</button>
 
   </div>
 
@@ -742,64 +743,68 @@ function effectiveSpacingKm(baseSpacing) {
 // OVERPASS
 // ═══════════════════════════════════════════════════════════════════════
 function buildBbox(a, b, padKm = 10) {
-  // Pad by a fixed km amount in each direction for consistent results
-  const padDeg = padKm / 111;
+  const padLat = padKm / 111;
+  const midLat = (a.lat + b.lat) / 2;
+  const padLon = padKm / (111 * Math.cos(midLat * Math.PI / 180));
   return [
-    Math.min(a.lat, b.lat) - padDeg,
-    Math.min(a.lon, b.lon) - padDeg,
-    Math.max(a.lat, b.lat) + padDeg,
-    Math.max(a.lon, b.lon) + padDeg,
-  ].map(v => v.toFixed(5)).join(',');
+    (Math.min(a.lat, b.lat) - padLat).toFixed(5),
+    (Math.min(a.lon, b.lon) - padLon).toFixed(5),
+    (Math.max(a.lat, b.lat) + padLat).toFixed(5),
+    (Math.max(a.lon, b.lon) + padLon).toFixed(5),
+  ].join(',');
 }
 
 function buildOverpassQuery(style, bbox) {
   const types  = allowedOsmTypes();
-  // Build the highway type regex for Overpass
   const hwRe   = `~"^(${types.join('|')})$"`;
-
-  // Gravel surface filter
   const surfRe = state.gravelPct >= 60
     ? `["surface"~"^(gravel|unpaved|fine_gravel|dirt|ground|compacted)$"]`
     : '';
+  const gravel = state.gravelPct >= 60
+    ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});
+`
+    : '';
 
-  let union = '';
+  // Simple, robust queries — no area filters which cause 404 errors.
+  // The highway slider already limits road types to small roads (unclassified,
+  // tertiary etc) which naturally run through rural, scenic, and twisty areas.
+  // Scenic and twisty styles additionally bias toward the smallest road types.
+
+  if (style.scenicFilter && style.twistyFilter) {
+    return `[out:json][timeout:25];
+(
+  way["highway"~"^(unclassified|track)$"](${bbox});
+  way["highway"="tertiary"](${bbox});
+${types.includes('secondary') ? `  way["highway"="secondary"](${bbox});
+` : ''}${gravel});
+out center qt;`;
+  }
 
   if (style.scenicFilter) {
-    // Roads through nature areas — intersect with allowed highway types
-    union += `
-  way["highway"${hwRe}]["leisure"="nature_reserve"](${bbox});
-  way["highway"${hwRe}]["landuse"="forest"](${bbox});
-  way["highway"${hwRe}]["natural"="wood"](${bbox});
-  way["highway"${hwRe}]["boundary"="national_park"](${bbox});
-  way["highway"${hwRe}]["route"="scenic"](${bbox});`;
+    return `[out:json][timeout:25];
+(
+  way["highway"~"^(unclassified|track)$"](${bbox});
+  way["highway"="tertiary"](${bbox});
+${types.includes('secondary') ? `  way["highway"="secondary"](${bbox});
+` : ''}${gravel});
+out center qt;`;
   }
 
   if (style.twistyFilter) {
-    // Small winding roads — specifically unclassified and tertiary
-    union += `
-  way["highway"~"^(unclassified|tertiary)$"]${surfRe}(${bbox});`;
-    if (types.includes('secondary')) {
-      union += `
-  way["highway"="secondary"]["maxspeed"!~"^(100|110|120|130)$"]${surfRe}(${bbox});`;
-    }
+    return `[out:json][timeout:25];
+(
+  way["highway"~"^(unclassified|tertiary)$"]${surfRe}(${bbox});
+${types.includes('secondary') ? `  way["highway"="secondary"]["maxspeed"!~"^(100|110|120|130)$"]${surfRe}(${bbox});
+` : ''}  way["highway"${hwRe}]${surfRe}(${bbox});
+${gravel});
+out center qt;`;
   }
 
-  if (!style.scenicFilter && !style.twistyFilter) {
-    // Generic: any allowed road type
-    union += `
-  way["highway"${hwRe}]${surfRe}(${bbox});`;
-  }
-
-  // Always include gravel tracks if gravel % is high
-  if (state.gravelPct >= 60) {
-    union += `
-  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});`;
-  }
-
-  return `[out:json][timeout:30];
-(${union}
-);
-out center;`;
+  return `[out:json][timeout:25];
+(
+  way["highway"${hwRe}]${surfRe}(${bbox});
+${gravel});
+out center qt;`;
 }
 
 async function runOverpass(ql) {
@@ -809,6 +814,24 @@ async function runOverpass(ql) {
   });
   if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
   return res.json();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// COORDINATE EXTRACTION
+// Overpass "out center qt;" returns a center{lat,lon} for each way.
+// This works for both closed polygons AND linear ways in modern Overpass.
+// We also handle nodes (lat/lon directly on element) as fallback.
+// ═══════════════════════════════════════════════════════════════════════
+function extractPts(elements) {
+  const pts = [];
+  for (const el of elements) {
+    if (el.center?.lat != null && el.center?.lon != null) {
+      pts.push({ lat: el.center.lat, lon: el.center.lon });
+    } else if (el.lat != null && el.lon != null) {
+      pts.push({ lat: el.lat, lon: el.lon });
+    }
+  }
+  return pts;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -825,40 +848,60 @@ async function runOverpass(ql) {
 // ═══════════════════════════════════════════════════════════════════════
 function buildWaypointChain(elements, start, end, spacingKm) {
   if (!elements?.length) return [];
-
-  // Extract center coords from Overpass way elements
-  const pts = elements
-    .filter(el => el.center || (el.lat && el.lon))
-    .map(el => ({ lat: el.center?.lat ?? el.lat, lon: el.center?.lon ?? el.lon }));
+  const pts = extractPts(elements);
   if (!pts.length) return [];
 
-  const totalKm  = haversineKm(start, end);
-  const count    = Math.max(1, Math.floor(totalKm / spacingKm));
+  const totalKm = haversineKm(start, end);
+  const count   = Math.max(1, Math.floor(totalKm / spacingKm));
   const selected = [];
 
   for (let i = 1; i <= count; i++) {
     const t = i / (count + 1);
-    // Target position along the straight line
+    // Target position along the straight line A→B
     const target = {
       lat: start.lat + (end.lat - start.lat) * t,
       lon: start.lon + (end.lon - start.lon) * t,
     };
 
-    // Find the closest unused Overpass point to this target
+    // Find the closest road element to this target position.
+    // No distance cap — if Overpass returned it, it's in our bbox, use it.
+    // Skip points already selected (within 1 km of an existing waypoint).
     let best = null, bestDist = Infinity;
     for (const p of pts) {
-      // Skip if this point was already picked (within 0.5 km)
-      if (selected.some(s => haversineKm(s, p) < 0.5)) continue;
+      if (selected.some(s => haversineKm(s, p) < 1.0)) continue;
       const d = haversineKm(target, p);
-      // Only consider points within 2× the spacing distance of the target
-      if (d < bestDist && d < spacingKm * 2) {
-        bestDist = d; best = p;
-      }
+      if (d < bestDist) { bestDist = d; best = p; }
     }
 
     if (best) selected.push({ lat: best.lat, lon: best.lon });
   }
 
+  return selected;
+}
+
+// Relaxed version — no dedup, just picks nearest point to each segment position.
+// Used as fallback when strict version returns 0 waypoints.
+function buildWaypointChainRelaxed(elements, start, end, spacingKm) {
+  const pts = extractPts(elements);
+  if (!pts.length) return [];
+
+  const totalKm = haversineKm(start, end);
+  const count   = Math.max(1, Math.floor(totalKm / spacingKm));
+  const selected = [];
+
+  for (let i = 1; i <= count; i++) {
+    const t      = i / (count + 1);
+    const target = {
+      lat: start.lat + (end.lat - start.lat) * t,
+      lon: start.lon + (end.lon - start.lon) * t,
+    };
+    let best = null, bestDist = Infinity;
+    for (const p of pts) {
+      const d = haversineKm(target, p);
+      if (d < bestDist) { bestDist = d; best = p; }
+    }
+    if (best) selected.push({ lat: best.lat, lon: best.lon });
+  }
   return selected;
 }
 
@@ -884,25 +927,57 @@ async function buildRoute(from, to, style, statusPrefix) {
   let viaPoints = [];
 
   if (style.spacingKm !== null) {
-    // How tight to space waypoints based on highway slider
-    const spacing = effectiveSpacingKm(style.spacingKm);
-    const padKm   = Math.max(haversineKm(from, to) * 0.3, 15);
+    const spacing    = effectiveSpacingKm(style.spacingKm);
+    const straightKm = haversineKm(from, to);
+    const padKm      = Math.max(straightKm * 0.5, 20);
+    const bbox       = buildBbox(from, to, padKm);
+    const ql         = buildOverpassQuery(style, bbox);
 
-    showStatus(`${statusPrefix} Querying OSM for allowed roads (highway ≤ ${state.highwayPct}%)…`);
+    console.log('=== OVERPASS DEBUG ===');
+    console.log('bbox:', bbox);
+    console.log('spacing:', spacing, 'km');
+    console.log('straight dist:', straightKm.toFixed(1), 'km');
+    console.log('query:', ql);
 
-    const bbox = buildBbox(from, to, padKm);
-    const ql   = buildOverpassQuery(style, bbox);
+    showStatus(`${statusPrefix} Querying OSM (bbox: ${bbox.split(',').map(n=>parseFloat(n).toFixed(2)).join(',')})…`);
 
     let elements = [];
     try {
-      const data = await runOverpass(ql);
-      elements = data.elements || [];
+      const raw = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST', body: ql,
+        headers: { 'Content-Type': 'text/plain' },
+      });
+      showStatus(`${statusPrefix} Overpass HTTP ${raw.status}…`);
+      if (!raw.ok) {
+        const txt = await raw.text();
+        console.error('Overpass error:', raw.status, txt);
+        showStatus(`${statusPrefix} Overpass error ${raw.status}: ${txt.slice(0,120)}`, 'error');
+      } else {
+        const data = await raw.json();
+        elements = data.elements || [];
+        console.log('Elements returned:', elements.length);
+        console.log('First 3 elements:', JSON.stringify(elements.slice(0,3), null, 2));
+      }
     } catch (e) {
-      showStatus(`${statusPrefix} Overpass unavailable — routing direct…`);
+      console.error('Overpass fetch failed:', e);
+      showStatus(`${statusPrefix} Overpass fetch failed: ${e.message}`, 'error');
     }
 
-    showStatus(`${statusPrefix} ${elements.length} road segments found — building ${spacing} km waypoint chain…`);
+    showStatus(`${statusPrefix} ${elements.length} segments found — extracting coords…`);
+    const pts = extractPts(elements);
+    console.log('extractPts result:', pts.length, 'points');
+    console.log('First 3 pts:', pts.slice(0,3));
+
+    const expectedCount = Math.floor(straightKm / spacing);
+    showStatus(`${statusPrefix} ${pts.length} coords extracted — building chain (${expectedCount} waypoints expected)…`);
+
     viaPoints = buildWaypointChain(elements, from, to, spacing);
+    console.log('buildWaypointChain result:', viaPoints.length);
+    if (viaPoints.length === 0 && pts.length > 0) {
+      console.log('Trying relaxed chain...');
+      viaPoints = buildWaypointChainRelaxed(elements, from, to, spacing);
+      console.log('buildWaypointChainRelaxed result:', viaPoints.length);
+    }
     showStatus(`${statusPrefix} ${viaPoints.length} waypoints placed — routing via OSRM…`);
   } else {
     showStatus(`${statusPrefix} Fastest mode — direct OSRM routing…`);
@@ -1363,6 +1438,47 @@ map.on('click', async e => {
 // ═══════════════════════════════════════════════════════════════════════
 // CALCULATE BUTTON
 // ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// DEBUG: Test Overpass directly and show raw response
+// ═══════════════════════════════════════════════════════════════════════
+document.getElementById('debug-btn').addEventListener('click', async () => {
+  const from = state.start || state.rtStart;
+  if (!from) { showStatus('Set a start point first', 'error'); return; }
+  const to = state.end || { lat: from.lat + 0.5, lon: from.lon + 0.5 };
+
+  const padKm = 20;
+  const bbox  = buildBbox(from, to, padKm);
+  const style = ROUTE_STYLES[state.styleKey];
+
+  showStatus(`Testing Overpass… bbox: ${bbox}`);
+
+  // First test a simple query to confirm connectivity
+  const simpleQl = `[out:json][timeout:15];
+(
+  way["highway"="unclassified"](${bbox});
+);
+out center qt 2000;`;
+
+  try {
+    showStatus('Sending simple test query (unclassified roads)…');
+    const res  = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST', body: simpleQl,
+      headers: { 'Content-Type': 'text/plain' },
+    });
+    showStatus(`HTTP ${res.status} received…`);
+    const txt  = await res.text();
+    showStatus(`Raw response (first 300 chars): ${txt.slice(0, 300)}`);
+    try {
+      const data = JSON.parse(txt);
+      showStatus(`✓ Parsed OK — ${data.elements?.length ?? 0} elements returned for simple query`, 'success');
+    } catch (e) {
+      showStatus(`✗ JSON parse failed: ${e.message} — response was: ${txt.slice(0,200)}`, 'error');
+    }
+  } catch (e) {
+    showStatus(`✗ Fetch failed entirely: ${e.message}`, 'error');
+  }
+});
+
 async function onCalculate() {
   const btn = document.getElementById('generate-btn');
   btn.disabled = true;
