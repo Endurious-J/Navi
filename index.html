@@ -595,96 +595,66 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════════
-// ROUTE STYLE DEFINITIONS — add new styles here, UI auto-updates
+// ROUTE STYLE DEFINITIONS
+// Add new styles here — UI builds itself automatically.
 // ═══════════════════════════════════════════════════════════════════════
 const ROUTE_STYLES = {
 
   fastest: {
     icon: '🚀', name: 'Fastest', desc: 'Direct · all roads',
-    detail: 'Shortest travel time. Uses all road types. No detour logic — pure A→B.',
-    waypointCount: 0, waypointBias: 0, overpassQuery: null,
+    detail: 'Shortest travel time. No waypoint injection — pure A→B via OSRM.',
+    spacingKm: null,   // null = skip waypoint injection entirely
+    // OSM highway types allowed as waypoints (ignored when spacingKm is null)
+    allowedTypes: [],
+    // Extra OSM filters for scenic/nature areas
+    scenicFilter: false,
+    twistyFilter: false,
   },
 
   scenic: {
     icon: '🌄', name: 'Scenic', desc: 'Parks · forests · nature',
-    detail: 'Routes through nature reserves, national parks, and forests. Injects waypoints through green areas.',
-    waypointCount: 4, waypointBias: 0.35,
-    overpassQuery: (bbox) => `
-[out:json][timeout:25];
-(
-  way["leisure"="nature_reserve"]["highway"~"^(unclassified|tertiary|secondary|track)$"](${bbox});
-  way["boundary"="national_park"]["highway"~"^(unclassified|tertiary|secondary)$"](${bbox});
-  way["landuse"="forest"]["highway"~"^(unclassified|tertiary|track)$"](${bbox});
-  way["natural"="wood"]["highway"~"^(unclassified|tertiary)$"](${bbox});
-  way["highway"~"^(unclassified|tertiary)$"]["scenic"="yes"](${bbox});
-  way["route"="scenic"](${bbox});
-);
-out center;`,
+    detail: 'Routes through nature reserves, forests and parks. Injects evenly-spaced waypoints on smaller roads through green areas.',
+    spacingKm: 8,
+    allowedTypes: ['unclassified','tertiary','secondary','track'],
+    scenicFilter: true,
+    twistyFilter: false,
   },
 
   twisty: {
-    icon: '🌀', name: 'Twisty', desc: 'Curves · bends · no highways',
-    detail: 'Maximises turns and bends. Seeks unclassified and tertiary roads. Avoids straight main roads.',
-    waypointCount: 5, waypointBias: 0.45,
-    overpassQuery: (bbox) => `
-[out:json][timeout:25];
-(
-  way["highway"="unclassified"](${bbox});
-  way["highway"="tertiary"](${bbox});
-  way["highway"="secondary"]["maxspeed"!~"^(80|90|100|110|120|130)$"](${bbox});
-  way["highway"="track"]["tracktype"="grade1"](${bbox});
-);
-out center;`,
+    icon: '🌀', name: 'Twisty', desc: 'Curves · bends · turns',
+    detail: 'Maximises bends and turns. Anchors route on unclassified and tertiary roads with dense waypoints.',
+    spacingKm: 8,
+    allowedTypes: ['unclassified','tertiary','secondary','track'],
+    scenicFilter: false,
+    twistyFilter: true,
   },
 
   scenic_twisty: {
     icon: '🏔️', name: 'Scenic & Twisty', desc: 'Nature + curves',
-    detail: 'Routes through parks and forests while maximising bends. Best of both worlds.',
-    waypointCount: 5, waypointBias: 0.4,
-    overpassQuery: (bbox) => `
-[out:json][timeout:25];
-(
-  way["leisure"="nature_reserve"]["highway"~"^(unclassified|tertiary|track)$"](${bbox});
-  way["landuse"="forest"]["highway"~"^(unclassified|tertiary|track)$"](${bbox});
-  way["natural"="wood"]["highway"~"^(unclassified|tertiary)$"](${bbox});
-  way["highway"="unclassified"]["maxspeed"!~"^(80|90|100|110|120|130)$"](${bbox});
-  way["highway"="tertiary"]["maxspeed"!~"^(80|90|100|110|120|130)$"](${bbox});
-  way["highway"="track"]["tracktype"="grade1"](${bbox});
-);
-out center;`,
+    detail: 'Parks and forests combined with maximum bends. Dense waypoints on small roads through green areas.',
+    spacingKm: 8,
+    allowedTypes: ['unclassified','tertiary','secondary','track'],
+    scenicFilter: true,
+    twistyFilter: true,
   },
 
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// COMPASS DIRECTIONS
-// ═══════════════════════════════════════════════════════════════════════
-const COMPASS_DIRS = [
-  { label: 'N',  deg: 0,    x: 50, y: 8  },
-  { label: 'NE', deg: 45,   x: 82, y: 18 },
-  { label: 'E',  deg: 90,   x: 92, y: 50 },
-  { label: 'SE', deg: 135,  x: 82, y: 82 },
-  { label: 'S',  deg: 180,  x: 50, y: 92 },
-  { label: 'SW', deg: 225,  x: 18, y: 82 },
-  { label: 'W',  deg: 270,  x: 8,  y: 50 },
-  { label: 'NW', deg: 315,  x: 18, y: 18 },
-];
-
-// ═══════════════════════════════════════════════════════════════════════
 // APP STATE
 // ═══════════════════════════════════════════════════════════════════════
 const state = {
-  mode: 'p2p',          // 'p2p' | 'round'
-  start:    null,       // { lat, lon, label }
-  end:      null,
-  rtStart:  null,       // roundtrip start (= end)
-  gravelPct: 20,
-  highwayPct: 30,   // 0 = no highways, 100 = fully allowed
-  desiredKmP2P: null,  // optional desired km for P2P (null = no target)
-  styleKey: 'fastest',
-  pinMode:  null,
-  targetKm: 150,
-  bearingDeg: null,     // null = random
+  mode:       'p2p',
+  start:      null,
+  end:        null,
+  rtStart:    null,
+  gravelPct:  20,
+  highwayPct: 30,
+  styleKey:   'fastest',
+  pinMode:    null,
+  targetKm:   150,
+  bearingDeg: null,
+  desiredKmP2P: null,
   layers: { route: null, start: null, end: null, rtStart: null, turn: null, via: [] },
   gpxContent: null,
 };
@@ -711,17 +681,456 @@ const ICONS = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
+// GEO MATH
+// ═══════════════════════════════════════════════════════════════════════
+const DEG2RAD = Math.PI / 180;
+const RAD2DEG = 180 / Math.PI;
+const EARTH_KM = 6371;
+
+function haversineKm(a, b) {
+  const dLat = (b.lat - a.lat) * DEG2RAD;
+  const dLon = (b.lon - a.lon) * DEG2RAD;
+  const h = Math.sin(dLat/2)**2 +
+            Math.cos(a.lat*DEG2RAD) * Math.cos(b.lat*DEG2RAD) * Math.sin(dLon/2)**2;
+  return 2 * EARTH_KM * Math.asin(Math.sqrt(h));
+}
+
+function projectPoint(lat, lon, bearingDeg, distKm) {
+  const φ1 = lat * DEG2RAD;
+  const λ1 = lon * DEG2RAD;
+  const θ  = bearingDeg * DEG2RAD;
+  const δ  = distKm / EARTH_KM;
+  const φ2 = Math.asin(Math.sin(φ1)*Math.cos(δ) + Math.cos(φ1)*Math.sin(δ)*Math.cos(θ));
+  const λ2 = λ1 + Math.atan2(Math.sin(θ)*Math.sin(δ)*Math.cos(φ1), Math.cos(δ)-Math.sin(φ1)*Math.sin(φ2));
+  return { lat: φ2 * RAD2DEG, lon: λ2 * RAD2DEG };
+}
+
+function midpoint(a, b) {
+  return { lat: (a.lat + b.lat) / 2, lon: (a.lon + b.lon) / 2 };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HIGHWAY SLIDER → OSM TAG FILTER
+//
+// This is the core of the highway avoidance strategy.
+// Overpass only returns roads with these highway types.
+// OSRM can only use waypoints we give it — if a waypoint is on an
+// unclassified road 8 km from the next one, OSRM routes through
+// small roads to reach it rather than jumping onto a motorway.
+// ═══════════════════════════════════════════════════════════════════════
+function allowedOsmTypes() {
+  const pct = state.highwayPct;
+  if (pct <=  0) return ['unclassified', 'track'];
+  if (pct <= 20) return ['unclassified', 'tertiary', 'track'];
+  if (pct <= 40) return ['unclassified', 'tertiary', 'secondary', 'track'];
+  if (pct <= 60) return ['unclassified', 'tertiary', 'secondary', 'primary'];
+  if (pct <= 80) return ['unclassified', 'tertiary', 'secondary', 'primary', 'trunk'];
+  return ['unclassified', 'tertiary', 'secondary', 'primary', 'trunk', 'motorway'];
+}
+
+// How many km between injected waypoints.
+// Tighter spacing = harder for OSRM to sneak onto a motorway between them.
+function effectiveSpacingKm(baseSpacing) {
+  const pct = state.highwayPct;
+  if (pct <=  0) return 4;
+  if (pct <= 20) return 5;
+  if (pct <= 40) return 7;
+  return baseSpacing; // 8 km default
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// OVERPASS
+// ═══════════════════════════════════════════════════════════════════════
+function buildBbox(a, b, padKm = 10) {
+  // Pad by a fixed km amount in each direction for consistent results
+  const padDeg = padKm / 111;
+  return [
+    Math.min(a.lat, b.lat) - padDeg,
+    Math.min(a.lon, b.lon) - padDeg,
+    Math.max(a.lat, b.lat) + padDeg,
+    Math.max(a.lon, b.lon) + padDeg,
+  ].map(v => v.toFixed(5)).join(',');
+}
+
+function buildOverpassQuery(style, bbox) {
+  const types  = allowedOsmTypes();
+  // Build the highway type regex for Overpass
+  const hwRe   = `~"^(${types.join('|')})$"`;
+
+  // Gravel surface filter
+  const surfRe = state.gravelPct >= 60
+    ? `["surface"~"^(gravel|unpaved|fine_gravel|dirt|ground|compacted)$"]`
+    : '';
+
+  let union = '';
+
+  if (style.scenicFilter) {
+    // Roads through nature areas — intersect with allowed highway types
+    union += `
+  way["highway"${hwRe}]["leisure"="nature_reserve"](${bbox});
+  way["highway"${hwRe}]["landuse"="forest"](${bbox});
+  way["highway"${hwRe}]["natural"="wood"](${bbox});
+  way["highway"${hwRe}]["boundary"="national_park"](${bbox});
+  way["highway"${hwRe}]["route"="scenic"](${bbox});`;
+  }
+
+  if (style.twistyFilter) {
+    // Small winding roads — specifically unclassified and tertiary
+    union += `
+  way["highway"~"^(unclassified|tertiary)$"]${surfRe}(${bbox});`;
+    if (types.includes('secondary')) {
+      union += `
+  way["highway"="secondary"]["maxspeed"!~"^(100|110|120|130)$"]${surfRe}(${bbox});`;
+    }
+  }
+
+  if (!style.scenicFilter && !style.twistyFilter) {
+    // Generic: any allowed road type
+    union += `
+  way["highway"${hwRe}]${surfRe}(${bbox});`;
+  }
+
+  // Always include gravel tracks if gravel % is high
+  if (state.gravelPct >= 60) {
+    union += `
+  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});`;
+  }
+
+  return `[out:json][timeout:30];
+(${union}
+);
+out center;`;
+}
+
+async function runOverpass(ql) {
+  const res = await fetch('https://overpass-api.de/api/interpreter', {
+    method: 'POST', body: ql,
+    headers: { 'Content-Type': 'text/plain' },
+  });
+  if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
+  return res.json();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// WAYPOINT CHAIN BUILDER
+//
+// Key algorithm:
+// 1. Divide the A→B straight line into segments of `spacingKm`
+// 2. For each segment midpoint, find the nearest Overpass road element
+// 3. Use that road's center coordinate as the waypoint
+// 4. Result: a chain of waypoints every ~spacingKm, all on allowed roads
+//
+// No perpendicular nudging — we just pick the nearest real road.
+// The density of the chain is what enforces highway avoidance.
+// ═══════════════════════════════════════════════════════════════════════
+function buildWaypointChain(elements, start, end, spacingKm) {
+  if (!elements?.length) return [];
+
+  // Extract center coords from Overpass way elements
+  const pts = elements
+    .filter(el => el.center || (el.lat && el.lon))
+    .map(el => ({ lat: el.center?.lat ?? el.lat, lon: el.center?.lon ?? el.lon }));
+  if (!pts.length) return [];
+
+  const totalKm  = haversineKm(start, end);
+  const count    = Math.max(1, Math.floor(totalKm / spacingKm));
+  const selected = [];
+
+  for (let i = 1; i <= count; i++) {
+    const t = i / (count + 1);
+    // Target position along the straight line
+    const target = {
+      lat: start.lat + (end.lat - start.lat) * t,
+      lon: start.lon + (end.lon - start.lon) * t,
+    };
+
+    // Find the closest unused Overpass point to this target
+    let best = null, bestDist = Infinity;
+    for (const p of pts) {
+      // Skip if this point was already picked (within 0.5 km)
+      if (selected.some(s => haversineKm(s, p) < 0.5)) continue;
+      const d = haversineKm(target, p);
+      // Only consider points within 2× the spacing distance of the target
+      if (d < bestDist && d < spacingKm * 2) {
+        bestDist = d; best = p;
+      }
+    }
+
+    if (best) selected.push({ lat: best.lat, lon: best.lon });
+  }
+
+  return selected;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// OSRM ROUTING
+// ═══════════════════════════════════════════════════════════════════════
+async function osrmRoute(waypoints) {
+  const coords = waypoints.map(w => `${w.lon},${w.lat}`).join(';');
+  const url    = `https://router.project-osrm.org/route/v1/driving/${coords}` +
+                 `?overview=full&geometries=geojson&steps=false`;
+  const res    = await fetch(url);
+  const data   = await res.json();
+  if (data.code !== 'Ok' || !data.routes?.length)
+    throw new Error(data.message || 'OSRM: no route found');
+  return data.routes[0]; // { distance (m), duration (s), geometry.coordinates [[lon,lat],...] }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// FULL PIPELINE: Overpass → waypoint chain → OSRM
+// Used by both P2P and each leg of roundtrip
+// ═══════════════════════════════════════════════════════════════════════
+async function buildRoute(from, to, style, statusPrefix) {
+  let viaPoints = [];
+
+  if (style.spacingKm !== null) {
+    // How tight to space waypoints based on highway slider
+    const spacing = effectiveSpacingKm(style.spacingKm);
+    const padKm   = Math.max(haversineKm(from, to) * 0.3, 15);
+
+    showStatus(`${statusPrefix} Querying OSM for allowed roads (highway ≤ ${state.highwayPct}%)…`);
+
+    const bbox = buildBbox(from, to, padKm);
+    const ql   = buildOverpassQuery(style, bbox);
+
+    let elements = [];
+    try {
+      const data = await runOverpass(ql);
+      elements = data.elements || [];
+    } catch (e) {
+      showStatus(`${statusPrefix} Overpass unavailable — routing direct…`);
+    }
+
+    showStatus(`${statusPrefix} ${elements.length} road segments found — building ${spacing} km waypoint chain…`);
+    viaPoints = buildWaypointChain(elements, from, to, spacing);
+    showStatus(`${statusPrefix} ${viaPoints.length} waypoints placed — routing via OSRM…`);
+  } else {
+    showStatus(`${statusPrefix} Fastest mode — direct OSRM routing…`);
+  }
+
+  // Add desired km stretch for P2P if set and no style waypoints
+  const desiredKm = parseFloat(document.getElementById('p2p-km-input')?.value) || null;
+  if (desiredKm && style.spacingKm === null) {
+    const straightKm = haversineKm(from, to);
+    if (desiredKm > straightKm * 1.1) {
+      const extraKm  = desiredKm - straightKm;
+      const nudgeKm  = Math.min(extraKm * 0.4, 150);
+      const mid      = midpoint(from, to);
+      const bearing  = Math.atan2(to.lon - from.lon, to.lat - from.lat) * RAD2DEG;
+      const perpBear = (bearing + 90) % 360;
+      const wpA = projectPoint(mid.lat, mid.lon, perpBear, nudgeKm * 0.6);
+      const wpB = projectPoint(mid.lat, mid.lon, (perpBear + 180) % 360, nudgeKm * 0.6);
+      viaPoints = [wpA, wpB];
+      showStatus(`${statusPrefix} Stretch waypoints added for ~${Math.round(desiredKm)} km target…`);
+    }
+  }
+
+  const allWaypoints = [from, ...viaPoints, to];
+  const route = await osrmRoute(allWaypoints);
+
+  return {
+    coords:   route.geometry.coordinates,  // [[lon,lat],...]
+    distKm:   (route.distance / 1000).toFixed(1),
+    timeH:    (route.duration / 3600).toFixed(1),
+    viaPoints,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MAP HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+function clearRouteLayers() {
+  if (state.layers.route) { map.removeLayer(state.layers.route); state.layers.route = null; }
+  if (state.layers.turn)  { map.removeLayer(state.layers.turn);  state.layers.turn  = null; }
+  state.layers.via.forEach(l => map.removeLayer(l));
+  state.layers.via = [];
+}
+
+function drawRoute(coordsArr, color = '#c8f060', dashed = false) {
+  const latLngs = coordsArr.map(c => [c[1], c[0]]);
+  return L.polyline(latLngs, {
+    color, weight: 4, opacity: 0.88,
+    lineJoin: 'round', lineCap: 'round',
+    ...(dashed ? { dashArray: '8,5' } : {}),
+  });
+}
+
+function drawVia(viaPoints) {
+  viaPoints.forEach(wp => {
+    state.layers.via.push(L.marker([wp.lat, wp.lon], { icon: ICONS.via }).addTo(map));
+  });
+}
+
+function showStats(distKm, timeH) {
+  document.getElementById('stat-dist').textContent  = distKm;
+  document.getElementById('stat-time').textContent  = timeH;
+  document.getElementById('route-stats').style.display = 'grid';
+  document.getElementById('download-btn').style.display = 'block';
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GPX BUILDER
+// ═══════════════════════════════════════════════════════════════════════
+function xmlEsc(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function buildGPX({ name, desc, startPt, endPt, coords, viaPoints, isRoundtrip }) {
+  const now    = new Date().toISOString();
+  const trkpts = coords.map(([lon, lat]) =>
+    `    <trkpt lat="${lat.toFixed(7)}" lon="${lon.toFixed(7)}"></trkpt>`
+  ).join('\n');
+
+  const viaWpts = viaPoints.map((wp, i) => `
+  <wpt lat="${wp.lat.toFixed(7)}" lon="${wp.lon.toFixed(7)}">
+    <name>Via ${i + 1}</name><sym>Waypoint</sym>
+  </wpt>`).join('');
+
+  const endWpt = isRoundtrip ? '' : `
+  <wpt lat="${endPt.lat.toFixed(7)}" lon="${endPt.lon.toFixed(7)}">
+    <name>End: ${xmlEsc(endPt.label || 'End')}</name>
+    <sym>Flag, Red</sym>
+  </wpt>`;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="MotoRoutePlannerGPX"
+  xmlns="http://www.topografix.com/GPX/1/1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">
+  <metadata>
+    <name>${xmlEsc(name)}</name>
+    <desc>${xmlEsc(desc)}</desc>
+    <time>${now}</time>
+  </metadata>
+  <wpt lat="${startPt.lat.toFixed(7)}" lon="${startPt.lon.toFixed(7)}">
+    <name>${isRoundtrip ? 'Start/End' : 'Start'}: ${xmlEsc(startPt.label || 'Start')}</name>
+    <sym>Flag, Green</sym>
+  </wpt>${viaWpts}${endWpt}
+  <trk>
+    <name>${xmlEsc(name)}</name>
+    <type>Motorcycling</type>
+    <trkseg>
+${trkpts}
+    </trkseg>
+  </trk>
+</gpx>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CALCULATE: POINT TO POINT
+// ═══════════════════════════════════════════════════════════════════════
+async function calculateP2P() {
+  if (!state.start || !state.end) {
+    showStatus('Set both start and end points first.', 'error'); return;
+  }
+  const style  = ROUTE_STYLES[state.styleKey];
+  const result = await buildRoute(state.start, state.end, style, '[P2P]');
+
+  // Draw
+  state.layers.route = drawRoute(result.coords).addTo(map);
+  drawVia(result.viaPoints);
+  map.fitBounds(state.layers.route.getBounds(), { padding: [40, 40] });
+
+  showStats(result.distKm, result.timeH);
+
+  const name = `${state.start.label || 'Start'} → ${state.end.label || 'End'}`;
+  state.gpxContent = buildGPX({
+    name, isRoundtrip: false,
+    desc: `Motorbike P2P | Style: ${style.name} | Highways: ${state.highwayPct}% | Surface: ${state.gravelPct}% gravel | ${result.distKm} km · ~${result.timeH} h | ${result.viaPoints.length} waypoints`,
+    startPt: state.start, endPt: state.end,
+    coords: result.coords, viaPoints: result.viaPoints,
+  });
+
+  showStatus(`Done — ${result.distKm} km · ~${result.timeH} h · ${style.name} · ${result.viaPoints.length} waypoints`, 'success');
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CALCULATE: ROUNDTRIP
+// ═══════════════════════════════════════════════════════════════════════
+async function calculateRoundtrip() {
+  if (!state.rtStart) {
+    showStatus('Set a start/home location first.', 'error'); return;
+  }
+
+  const style    = ROUTE_STYLES[state.styleKey];
+  const origin   = state.rtStart;
+  const bearing  = state.bearingDeg !== null ? state.bearingDeg : Math.random() * 360;
+  const bearingLabel = state.bearingDeg !== null
+    ? (COMPASS_DIRS.find(d => d.deg === state.bearingDeg)?.label || `${state.bearingDeg}°`)
+    : `random (${Math.round(bearing)}°)`;
+
+  const legKm  = state.targetKm / 2;
+  const turnPt = projectPoint(origin.lat, origin.lon, bearing, legKm);
+
+  showStatus(`[1/2] Turn point ${Math.round(legKm)} km ${bearingLabel} — routing outbound…`);
+
+  // Show turn marker
+  if (state.layers.turn) map.removeLayer(state.layers.turn);
+  state.layers.turn = L.marker([turnPt.lat, turnPt.lon], { icon: ICONS.turn })
+    .bindTooltip('Turnaround', { permanent: false }).addTo(map);
+
+  // Outbound leg
+  const legOut  = await buildRoute(origin, turnPt, style, '[Out]');
+
+  showStatus(`[2/2] Routing return leg…`);
+
+  // Return leg — use a slightly offset bearing so return takes a different path
+  const returnBearing = (bearing + 180 + (Math.random() * 30 - 15)) % 360;
+  const returnTurnPt  = projectPoint(origin.lat, origin.lon, returnBearing, legKm * 0.1);
+  const legBack = await buildRoute(turnPt, origin, style, '[Return]');
+
+  // Merge
+  const allCoords  = [...legOut.coords, ...legBack.coords.slice(1)];
+  const totalDist  = (parseFloat(legOut.distKm) + parseFloat(legBack.distKm)).toFixed(1);
+  const totalTime  = (parseFloat(legOut.timeH)  + parseFloat(legBack.timeH) ).toFixed(1);
+  const allVia     = [...legOut.viaPoints, ...legBack.viaPoints];
+
+  // Draw — outbound solid, return dashed
+  state.layers.route = L.layerGroup([
+    drawRoute(legOut.coords,  '#c8f060', false),
+    drawRoute(legBack.coords, '#90c020', true),
+  ]).addTo(map);
+
+  drawVia(allVia);
+  map.fitBounds(L.latLngBounds(allCoords.map(c => [c[1], c[0]])), { padding: [40, 40] });
+
+  showStats(totalDist, totalTime);
+
+  const name = `Roundtrip from ${origin.label || 'Home'}`;
+  state.gpxContent = buildGPX({
+    name, isRoundtrip: true,
+    desc: `Motorbike roundtrip | Style: ${style.name} | Direction: ${bearingLabel} | Highways: ${state.highwayPct}% | Surface: ${state.gravelPct}% gravel | ${totalDist} km · ~${totalTime} h`,
+    startPt: origin, endPt: origin,
+    coords: allCoords, viaPoints: allVia,
+  });
+
+  showStatus(`Done — ${totalDist} km · ~${totalTime} h · ${style.name} · heading ${bearingLabel}`, 'success');
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// STATUS BAR
+// ═══════════════════════════════════════════════════════════════════════
+function showStatus(msg, type = 'loading') {
+  const bar = document.getElementById('status-bar');
+  bar.className = 'status-bar visible' + (type !== 'loading' ? ` ${type}` : '');
+  document.getElementById('spinner').style.display   = type === 'loading' ? 'inline-block' : 'none';
+  document.getElementById('status-text').textContent = msg;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // MODE TABS
 // ═══════════════════════════════════════════════════════════════════════
-document.getElementById('tab-p2p').addEventListener('click', () => setMode('p2p'));
+document.getElementById('tab-p2p').addEventListener('click',   () => setMode('p2p'));
 document.getElementById('tab-round').addEventListener('click', () => setMode('round'));
 
 function setMode(mode) {
   state.mode = mode;
-  document.getElementById('tab-p2p').classList.toggle('active', mode === 'p2p');
+  document.getElementById('tab-p2p').classList.toggle('active',   mode === 'p2p');
   document.getElementById('tab-round').classList.toggle('active', mode === 'round');
-  document.getElementById('panel-p2p').style.display   = mode === 'p2p'   ? '' : 'none';
-  document.getElementById('panel-round').style.display = mode === 'round' ? '' : 'none';
+  document.getElementById('panel-p2p').style.display    = mode === 'p2p'   ? '' : 'none';
+  document.getElementById('panel-round').style.display  = mode === 'round' ? '' : 'none';
   document.getElementById('pin-toggle-p2p').style.display = mode === 'p2p'   ? '' : 'none';
   document.getElementById('pin-toggle-rt').style.display  = mode === 'round' ? '' : 'none';
   clearRouteLayers();
@@ -732,7 +1141,7 @@ function setMode(mode) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// BUILD STYLE CARDS
+// STYLE CARDS
 // ═══════════════════════════════════════════════════════════════════════
 (function buildStyleCards() {
   const container = document.getElementById('style-cards');
@@ -756,18 +1165,22 @@ function setMode(mode) {
 })();
 
 // ═══════════════════════════════════════════════════════════════════════
-// BUILD COMPASS ROSE
+// COMPASS ROSE
 // ═══════════════════════════════════════════════════════════════════════
+const COMPASS_DIRS = [
+  { label:'N',  deg:0,   x:50, y:8  }, { label:'NE', deg:45,  x:82, y:18 },
+  { label:'E',  deg:90,  x:92, y:50 }, { label:'SE', deg:135, x:82, y:82 },
+  { label:'S',  deg:180, x:50, y:92 }, { label:'SW', deg:225, x:18, y:82 },
+  { label:'W',  deg:270, x:8,  y:50 }, { label:'NW', deg:315, x:18, y:18 },
+];
+
 (function buildCompass() {
   const ring = document.getElementById('compass-ring');
 
-  // Random center button
   const randBtn = document.createElement('div');
   randBtn.className = 'compass-dir random-btn';
   randBtn.textContent = '🎲';
-  randBtn.title = 'Random direction';
-  randBtn.style.left = '50%';
-  randBtn.style.top  = '50%';
+  randBtn.style.cssText = 'left:50%;top:50%;';
   randBtn.addEventListener('click', () => {
     state.bearingDeg = null;
     document.querySelectorAll('.compass-dir:not(.random-btn)').forEach(b => b.classList.remove('active'));
@@ -779,8 +1192,7 @@ function setMode(mode) {
     const btn = document.createElement('div');
     btn.className = 'compass-dir';
     btn.textContent = dir.label;
-    btn.style.left = dir.x + '%';
-    btn.style.top  = dir.y + '%';
+    btn.style.cssText = `left:${dir.x}%;top:${dir.y}%;`;
     btn.addEventListener('click', () => {
       state.bearingDeg = dir.deg;
       document.querySelectorAll('.compass-dir:not(.random-btn)').forEach(b => b.classList.remove('active'));
@@ -794,11 +1206,29 @@ function setMode(mode) {
 // ═══════════════════════════════════════════════════════════════════════
 // SLIDERS
 // ═══════════════════════════════════════════════════════════════════════
+function surfaceHint(pct) {
+  if (pct <= 10) return 'Tarmac / paved roads only';
+  if (pct <= 30) return 'Mostly paved, some gravel ok';
+  if (pct <= 50) return 'Mixed — paved & gravel roads';
+  if (pct <= 70) return 'Prefer gravel & rural tracks';
+  if (pct <= 90) return 'Mostly gravel, unpaved tracks';
+  return 'Forest roads & unpaved public tracks';
+}
+
+function highwayHint(pct) {
+  if (pct ===  0) return 'No highways at all — unclassified & tracks only';
+  if (pct <= 20) return 'Strictly small roads — tertiary max';
+  if (pct <= 40) return 'Secondary roads max — no primary or above';
+  if (pct <= 60) return 'Primary roads ok — no trunk or motorway';
+  if (pct <= 80) return 'Trunk roads allowed — no motorways';
+  return 'All roads including motorways';
+}
+
 document.getElementById('gravel-slider').addEventListener('input', function () {
   state.gravelPct = parseInt(this.value);
   document.getElementById('gravel-val').textContent   = this.value + '%';
   document.getElementById('surface-fill').style.width = this.value + '%';
-  document.getElementById('surface-hint').textContent  = surfaceHint(state.gravelPct);
+  document.getElementById('surface-hint').textContent = surfaceHint(state.gravelPct);
 });
 document.getElementById('surface-hint').textContent = surfaceHint(20);
 
@@ -817,54 +1247,18 @@ document.getElementById('dist-slider').addEventListener('input', function () {
   document.getElementById('dist-fill').style.width = pct + '%';
 });
 
-function surfaceHint(pct) {
-  if (pct <=  10) return 'Tarmac / paved roads only';
-  if (pct <=  30) return 'Mostly paved, some gravel ok';
-  if (pct <=  50) return 'Mixed — paved & gravel roads';
-  if (pct <=  70) return 'Prefer gravel & rural tracks';
-  if (pct <=  90) return 'Mostly gravel, unpaved tracks';
-  return 'Forest roads & unpaved public tracks';
-}
-
-function highwayHint(pct) {
-  if (pct ===   0) return "No highways or motorways at all";
-  if (pct <=  20) return "Highways avoided — small roads only";
-  if (pct <=  40) return "Mostly small roads, minimal highway";
-  if (pct <=  60) return "Mix of small roads and some highway";
-  if (pct <=  80) return "Highways allowed for longer stretches";
-  return "Highways fully allowed";
-}
-
-// Returns extra Overpass filter clause to append when highways should be avoided
-// Road types allowed at each highway % level — Overpass only returns
-// roads within this set, so snapping can never land on a motorway.
-function allowedHighwayTypes() {
-  const pct = state.highwayPct;
-  if (pct <=  0) return '~"^(unclassified|track)$"';
-  if (pct <= 20) return '~"^(unclassified|tertiary|track)$"';
-  if (pct <= 40) return '~"^(unclassified|tertiary|secondary|track)$"';
-  if (pct <= 60) return '~"^(unclassified|tertiary|secondary|primary)$"';
-  if (pct <= 80) return '~"^(unclassified|tertiary|secondary|primary|trunk)$"';
-  return '~"^(unclassified|tertiary|secondary|primary|trunk|motorway)$"';
-}
-
-function gravelOverpassClause(bbox) {
-  return `
-  way["highway"${allowedHighwayTypes()}]["surface"~"^(gravel|unpaved|fine_gravel|dirt|ground|compacted)$"](${bbox});
-  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});`;
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 // GEOCODING
 // ═══════════════════════════════════════════════════════════════════════
 function setCoord(which, lat, lon, label) {
   state[which] = { lat, lon, label };
-  const coordEl = document.getElementById(which === 'rtStart' ? 'rt-start-coord' : `${which}-coord`);
+  const coordId = which === 'rtStart' ? 'rt-start-coord' : `${which}-coord`;
+  const inputId = which === 'rtStart' ? 'rt-start-input' : `${which}-input`;
+  document.getElementById(coordId)?.setAttribute('data-val', `${lat.toFixed(5)}, ${lon.toFixed(5)}`);
+  const coordEl = document.getElementById(coordId);
   if (coordEl) coordEl.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
-
-  const inputEl = document.getElementById(which === 'rtStart' ? 'rt-start-input' : `${which}-input`);
+  const inputEl = document.getElementById(inputId);
   if (inputEl && label) inputEl.value = label;
-
   if (state.layers[which]) map.removeLayer(state.layers[which]);
   state.layers[which] = L.marker([lat, lon], { icon: ICONS[which] || ICONS.start }).addTo(map);
   map.setView([lat, lon], Math.max(map.getZoom(), 9));
@@ -875,7 +1269,6 @@ function setupSearch(inputId, suggestId, which) {
   const input   = document.getElementById(inputId);
   const suggest = document.getElementById(suggestId);
   if (!input || !suggest) return;
-
   input.addEventListener('input', () => {
     clearTimeout(debounce);
     const q = input.value.trim();
@@ -892,7 +1285,7 @@ async function nominatimSearch(q, box, which) {
   try {
     const res  = await fetch(
       `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=5`,
-      { headers: { 'User-Agent': 'MotoRoutePlannerGPX/2.0' } }
+      { headers: { 'User-Agent': 'MotoRoutePlannerGPX/3.0' } }
     );
     const data = await res.json();
     box.innerHTML = '';
@@ -928,8 +1321,7 @@ setupSearch('rt-start-input', 'rt-start-suggestions', 'rtStart');
 function setPinMode(mode) {
   state.pinMode = mode;
   ['start','end','rt-start'].forEach(w => {
-    const btn = document.getElementById(`map-pin-${w}`);
-    if (btn) btn.classList.toggle('active', mode === w);
+    document.getElementById(`map-pin-${w}`)?.classList.toggle('active', mode === w);
   });
   document.getElementById('map-hint').textContent = mode
     ? `Click the map to set the ${mode.replace('-',' ')} point`
@@ -951,578 +1343,22 @@ document.getElementById('map-pin-rt-start')?.addEventListener('click',
 map.on('click', async e => {
   if (!state.pinMode) return;
   const { lat, lng } = e.latlng;
-  const pinMode = state.pinMode;
-  const which   = pinMode === 'rt-start' ? 'rtStart' : pinMode;
+  const which = state.pinMode === 'rt-start' ? 'rtStart' : state.pinMode;
   setPinMode(null);
   try {
     const res  = await fetch(
       `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`,
-      { headers: { 'User-Agent': 'MotoRoutePlannerGPX/2.0' } }
+      { headers: { 'User-Agent': 'MotoRoutePlannerGPX/3.0' } }
     );
     const data = await res.json();
     const label = data.display_name
-      ? data.display_name.split(',').slice(0, 2).join(',').trim()
+      ? data.display_name.split(',').slice(0,2).join(',').trim()
       : `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
     setCoord(which, lat, lng, label);
   } catch {
     setCoord(which, lat, lng, `${lat.toFixed(4)}, ${lng.toFixed(4)}`);
   }
 });
-
-// ═══════════════════════════════════════════════════════════════════════
-// STATUS
-// ═══════════════════════════════════════════════════════════════════════
-function showStatus(msg, type = 'loading') {
-  const bar = document.getElementById('status-bar');
-  bar.className = 'status-bar visible' + (type !== 'loading' ? ` ${type}` : '');
-  document.getElementById('spinner').style.display   = type === 'loading' ? 'inline-block' : 'none';
-  document.getElementById('status-text').textContent = msg;
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// GEO HELPERS
-// ═══════════════════════════════════════════════════════════════════════
-const DEG2RAD = Math.PI / 180;
-const RAD2DEG = 180 / Math.PI;
-const EARTH_KM = 6371;
-
-function buildBbox(s, e, padFactor) {
-  const latMin = Math.min(s.lat, e.lat);
-  const latMax = Math.max(s.lat, e.lat);
-  const lonMin = Math.min(s.lon, e.lon);
-  const lonMax = Math.max(s.lon, e.lon);
-  const dLat   = Math.max((latMax - latMin) * padFactor, 0.06);
-  const dLon   = Math.max((lonMax - lonMin) * padFactor, 0.06);
-  return `${(latMin-dLat).toFixed(5)},${(lonMin-dLon).toFixed(5)},${(latMax+dLat).toFixed(5)},${(lonMax+dLon).toFixed(5)}`;
-}
-
-// Project a point `distKm` km from origin at `bearingDeg`
-function projectPoint(lat, lon, bearingDeg, distKm) {
-  const φ1 = lat * DEG2RAD;
-  const λ1 = lon * DEG2RAD;
-  const θ  = bearingDeg * DEG2RAD;
-  const δ  = distKm / EARTH_KM;
-
-  const φ2 = Math.asin(
-    Math.sin(φ1) * Math.cos(δ) +
-    Math.cos(φ1) * Math.sin(δ) * Math.cos(θ)
-  );
-  const λ2 = λ1 + Math.atan2(
-    Math.sin(θ) * Math.sin(δ) * Math.cos(φ1),
-    Math.cos(δ) - Math.sin(φ1) * Math.sin(φ2)
-  );
-  return { lat: φ2 * RAD2DEG, lon: λ2 * RAD2DEG };
-}
-
-// Build bounding box that contains both start and turn point with padding
-function buildRoundtripBbox(origin, turnPt, padFactor) {
-  return buildBbox(
-    { lat: Math.min(origin.lat, turnPt.lat), lon: Math.min(origin.lon, turnPt.lon) },
-    { lat: Math.max(origin.lat, turnPt.lat), lon: Math.max(origin.lon, turnPt.lon) },
-    padFactor
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// OVERPASS
-// ═══════════════════════════════════════════════════════════════════════
-async function runOverpass(ql) {
-  const res = await fetch('https://overpass-api.de/api/interpreter', {
-    method: 'POST', body: ql,
-    headers: { 'Content-Type': 'text/plain' },
-  });
-  if (!res.ok) throw new Error('Overpass error ' + res.status);
-  return res.json();
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// WAYPOINT SELECTION
-// ═══════════════════════════════════════════════════════════════════════
-// Effective waypoint count — more anchors when highways must be avoided
-function waypointCount(baseCount) {
-  const pct = state.highwayPct;
-  if (pct <=  0) return baseCount * 4;
-  if (pct <= 20) return baseCount * 3;
-  if (pct <= 40) return baseCount * 2;
-  if (pct <= 60) return Math.round(baseCount * 1.5);
-  return baseCount;
-}
-
-// Haversine distance in km between two {lat,lon} points
-function haversineKm(a, b) {
-  const dLat = (b.lat - a.lat) * DEG2RAD;
-  const dLon = (b.lon - a.lon) * DEG2RAD;
-  const h = Math.sin(dLat/2)**2 +
-            Math.cos(a.lat*DEG2RAD) * Math.cos(b.lat*DEG2RAD) * Math.sin(dLon/2)**2;
-  return 2 * EARTH_KM * Math.asin(Math.sqrt(h));
-}
-
-function selectWaypoints(elements, start, end, count, bias) {
-  if (!elements?.length || count === 0) return [];
-
-  const pts = elements
-    .filter(el => el.center || (el.lat && el.lon))
-    .map(el => ({ lat: el.center?.lat ?? el.lat, lon: el.center?.lon ?? el.lon }));
-  if (!pts.length) return [];
-
-  // Work in real km so bias is distance-proportional, not coordinate-proportional.
-  // Cap perpendicular nudge at 25% of the straight-line distance.
-  const straightKm = haversineKm(start, end);
-  const maxNudgeKm = Math.min(straightKm * 0.25, 40); // never more than 40 km off-track
-
-  // Coordinate-space direction vector
-  const dLat = end.lat - start.lat;
-  const dLon = end.lon - start.lon;
-  const len  = Math.sqrt(dLat * dLat + dLon * dLon) || 1;
-
-  // Perpendicular unit vector in coordinate space
-  const pLat = -dLon / len;
-  const pLon =  dLat / len;
-
-  // Convert maxNudgeKm to approximate degrees (1 deg lat ≈ 111 km)
-  const nudgeDeg = maxNudgeKm / 111;
-
-  const selected = [];
-  for (let i = 1; i <= count; i++) {
-    const t    = i / (count + 1);
-    const mLat = start.lat + dLat * t;
-    const mLon = start.lon + dLon * t;
-
-    // Find nearest unused Overpass point to this segment position
-    let best = null, bestDist = Infinity;
-    for (const p of pts) {
-      if (selected.some(s =>
-        Math.abs(s._sLat - p.lat) < 0.008 &&
-        Math.abs(s._sLon - p.lon) < 0.008)) continue;
-      const d = (p.lat - mLat) ** 2 + (p.lon - mLon) ** 2;
-      if (d < bestDist) { bestDist = d; best = p; }
-    }
-    if (best) {
-      // Alternate sides, nudge capped to nudgeDeg
-      const side = (i % 2 === 0) ? 1 : -1;
-      const nudge = nudgeDeg * bias * side;
-      selected.push({
-        lat: best.lat + pLat * nudge,
-        lon: best.lon + pLon * nudge,
-        _sLat: best.lat, _sLon: best.lon,
-      });
-    }
-  }
-  return selected;
-}
-
-// Snapping is no longer needed — Valhalla snaps internally.
-// Keep as pass-through so calling code doesn't need changes.
-async function snapAllToRoads(waypoints) {
-  return waypoints;
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// OSRM
-// ═══════════════════════════════════════════════════════════════════════
-// Decode a Valhalla encoded polyline6 string into [[lon,lat], ...] pairs
-function decodePolyline6(encoded) {
-  let index = 0, lat = 0, lon = 0;
-  const coords = [];
-  while (index < encoded.length) {
-    let b, shift = 0, result = 0;
-    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
-    lat += (result & 1) ? ~(result >> 1) : result >> 1;
-    shift = 0; result = 0;
-    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
-    lon += (result & 1) ? ~(result >> 1) : result >> 1;
-    coords.push([lon / 1e6, lat / 1e6]); // [lon, lat] to match OSRM convention
-  }
-  return coords;
-}
-
-async function valhallaRoute(waypoints) {
-  // Map highway slider (0-100) to Valhalla use_highways (0.0-1.0)
-  const useHighways    = state.highwayPct / 100;
-  // Map gravel slider (0-100) to use_trails (0.0-1.0)
-  const useTrails      = state.gravelPct  / 100;
-
-  const locations = waypoints.map(w => ({ lat: w.lat, lon: w.lon }));
-
-  const body = {
-    locations,
-    costing: 'motorcycle',
-    costing_options: {
-      motorcycle: {
-        use_highways: useHighways,
-        use_trails:   useTrails,
-        use_ferry:    0.1,
-      }
-    },
-    units: 'km',
-    shape_format: 'polyline6',
-  };
-
-  const res  = await fetch('https://valhalla1.openstreetmap.de/route', {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const err = await res.text().catch(() => res.statusText);
-    throw new Error(`Valhalla: ${err}`);
-  }
-
-  const data = await res.json();
-  if (!data.trip?.legs?.length) throw new Error('Valhalla: no route returned');
-
-  // Merge all leg shapes into one coordinate array [[lon,lat],...]
-  const coords = data.trip.legs.flatMap(leg => decodePolyline6(leg.shape));
-
-  // Sum up distance and time across legs
-  const distanceKm = data.trip.summary.length;   // already in km (units:'km')
-  const durationS  = data.trip.summary.time;     // seconds
-
-  return {
-    coords,                          // [[lon,lat],...]
-    distanceKm,
-    durationS,
-  };
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// OVERPASS QUERY HELPER (with optional gravel injection)
-// ═══════════════════════════════════════════════════════════════════════
-// Build Overpass query filtered to only road types allowed by the highway slider.
-// This is the key fix: Overpass only returns candidate roads that OSRM is
-// allowed to snap to — motorways simply don't appear in the result set.
-function buildFilteredQuery(style, bbox) {
-  const hwFilter = allowedHighwayTypes();
-  const base = style.overpassQuery(bbox);
-
-  // Build a cleaned union that intersects each way clause with the allowed types.
-  // Strategy: wrap the entire result in an additional highway filter.
-  let ql = `
-[out:json][timeout:30];
-(
-  way["highway"${hwFilter}](${bbox});
-)->.allowed;
-(`;
-
-  // Add style-specific sub-queries, each intersected with .allowed
-  if (style.key === 'scenic' || style.key === 'scenic_twisty') {
-    ql += `
-  way["leisure"="nature_reserve"]["highway"${hwFilter}](${bbox});
-  way["boundary"="national_park"]["highway"${hwFilter}](${bbox});
-  way["landuse"="forest"]["highway"${hwFilter}](${bbox});
-  way["natural"="wood"]["highway"${hwFilter}](${bbox});
-  way["route"="scenic"]["highway"${hwFilter}](${bbox});`;
-  }
-  if (style.key === 'twisty' || style.key === 'scenic_twisty') {
-    ql += `
-  way["highway"="unclassified"](${bbox});
-  way["highway"="tertiary"](${bbox});`;
-    // Only add secondary/primary if highway % allows them
-    if (state.highwayPct >= 30) ql += `
-  way["highway"="secondary"](${bbox});`;
-    if (state.highwayPct >= 60) ql += `
-  way["highway"="primary"](${bbox});`;
-  }
-  if (style.key === 'fastest') {
-    ql += `
-  way["highway"${hwFilter}](${bbox});`;
-  }
-
-  // Gravel clause if needed
-  if (state.gravelPct >= 60) {
-    ql += gravelOverpassClause(bbox);
-  }
-
-  ql += `
-);
-out center;`;
-  return ql;
-}
-
-async function queryOverpass(style, bbox) {
-  if (!style.overpassQuery || style.waypointCount === 0) return { elements: [] };
-  // Attach the style key so buildFilteredQuery can branch on it
-  style = { ...style, key: Object.keys(ROUTE_STYLES).find(k => ROUTE_STYLES[k] === style) || style.key };
-  const ql = buildFilteredQuery(style, bbox);
-  try {
-    return await runOverpass(ql);
-  } catch {
-    return { elements: [] };
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// GPX BUILDER
-// ═══════════════════════════════════════════════════════════════════════
-function xmlEsc(s) {
-  return String(s)
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-function buildGPX({ name, desc, startPt, endPt, coords, viaPoints, isRoundtrip }) {
-  const now    = new Date().toISOString();
-  const trkpts = coords.map(([lon, lat]) =>
-    `    <trkpt lat="${lat.toFixed(7)}" lon="${lon.toFixed(7)}"></trkpt>`
-  ).join('\n');
-
-  const viaWpts = viaPoints.map((wp, i) => `
-  <wpt lat="${wp.lat.toFixed(7)}" lon="${wp.lon.toFixed(7)}">
-    <name>Via ${i + 1}</name><sym>Waypoint</sym><type>via</type>
-  </wpt>`).join('');
-
-  const endWpt = isRoundtrip ? '' : `
-  <wpt lat="${endPt.lat.toFixed(7)}" lon="${endPt.lon.toFixed(7)}">
-    <name>End: ${xmlEsc(endPt.label || 'End')}</name>
-    <sym>Flag, Red</sym><type>end</type>
-  </wpt>`;
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="MotoRoutePlannerGPX"
-  xmlns="http://www.topografix.com/GPX/1/1"
-  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">
-  <metadata>
-    <name>${xmlEsc(name)}</name>
-    <desc>${xmlEsc(desc)}</desc>
-    <time>${now}</time>
-  </metadata>
-  <wpt lat="${startPt.lat.toFixed(7)}" lon="${startPt.lon.toFixed(7)}">
-    <name>${isRoundtrip ? 'Start/End: ' : 'Start: '}${xmlEsc(startPt.label || 'Start')}</name>
-    <sym>Flag, Green</sym><type>start</type>
-  </wpt>${viaWpts}${endWpt}
-  <trk>
-    <name>${xmlEsc(name)}</name>
-    <type>Motorcycling</type>
-    <trkseg>
-${trkpts}
-    </trkseg>
-  </trk>
-</gpx>`;
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// CLEAR MAP LAYERS
-// ═══════════════════════════════════════════════════════════════════════
-function clearRouteLayers() {
-  if (state.layers.route) { map.removeLayer(state.layers.route); state.layers.route = null; }
-  if (state.layers.turn)  { map.removeLayer(state.layers.turn);  state.layers.turn  = null; }
-  state.layers.via.forEach(l => map.removeLayer(l));
-  state.layers.via = [];
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// MAIN: POINT-TO-POINT ROUTE
-// ═══════════════════════════════════════════════════════════════════════
-async function calculateP2P() {
-  if (!state.start || !state.end) {
-    showStatus('Set both start and end points first.', 'error'); return;
-  }
-
-  const style = ROUTE_STYLES[state.styleKey];
-  let viaPoints = [];
-
-  // Step 1: Overpass + waypoint selection
-  if (style.waypointCount > 0) {
-    showStatus(`[1/3] Querying OSM for ${style.name.toLowerCase()} roads…`);
-    const bbox  = buildBbox(state.start, state.end, 0.4 + style.waypointBias);
-    const data  = await queryOverpass(style, bbox);
-    const count = waypointCount(style.waypointCount);
-    viaPoints   = selectWaypoints(data.elements, state.start, state.end, count, style.waypointBias);
-    showStatus(`[1/3] Found ${viaPoints.length} waypoints — snapping to roads…`);
-    viaPoints = await snapAllToRoads(viaPoints);
-    showStatus(`[1/3] Snapped ${viaPoints.length} waypoints to road network ✓`);
-  } else {
-    showStatus('[1/3] Fastest — skipping Overpass ✓');
-  }
-
-  // Step 1b: if desired km set, add extra stretch waypoints
-  const desiredKm = parseFloat(document.getElementById('p2p-km-input').value) || null;
-  if (desiredKm) {
-    const straightKm = haversineKm(state.start, state.end);
-    if (desiredKm > straightKm * 1.1) {
-      // We need to stretch the route — project additional side waypoints
-      // proportional to how much extra distance is needed
-      const extraKm   = desiredKm - straightKm;
-      const nudgeKm   = Math.min(extraKm * 0.4, 150); // reasonable cap
-      const midLat    = (state.start.lat + state.end.lat) / 2;
-      const midLon    = (state.start.lon + state.end.lon) / 2;
-      const dLat      = state.end.lat - state.start.lat;
-      const dLon      = state.end.lon - state.start.lon;
-      const len       = Math.sqrt(dLat*dLat + dLon*dLon) || 1;
-      const pLat      = -dLon / len;
-      const pLon      =  dLat / len;
-      const nudgeDeg  = nudgeKm / 111;
-      // Two stretch waypoints, one each side of the midpoint
-      const stretchA  = { lat: midLat + pLat * nudgeDeg * 0.6, lon: midLon + pLon * nudgeDeg * 0.6 };
-      const stretchB  = { lat: midLat - pLat * nudgeDeg * 0.6, lon: midLon - pLon * nudgeDeg * 0.6 };
-      const snapped   = await snapAllToRoads([stretchA, stretchB]);
-      // Insert stretch points around existing viaPoints
-      viaPoints = [snapped[0], ...viaPoints, snapped[1]];
-      showStatus(`[1/3] Stretch waypoints added for ~${Math.round(desiredKm)} km target ✓`);
-    }
-  }
-
-  // Step 2: Valhalla motorcycle routing
-  showStatus(`[2/3] Routing via Valhalla (highways: ${state.highwayPct}%, trails: ${state.gravelPct}%)…`);
-  const allWaypoints = [state.start, ...viaPoints, state.end];
-  const result = await valhallaRoute(allWaypoints);
-  const coords = result.coords;
-  const distKm = result.distanceKm.toFixed(1);
-  const timeH  = (result.durationS / 3600).toFixed(1);
-
-  // Step 3: Draw
-  showStatus('[3/3] Rendering…');
-  state.layers.route = L.polyline(
-    coords.map(c => [c[1], c[0]]),
-    { color: '#c8f060', weight: 4, opacity: 0.88, lineJoin: 'round', lineCap: 'round' }
-  ).addTo(map);
-  viaPoints.forEach(wp => {
-    state.layers.via.push(L.marker([wp.lat, wp.lon], { icon: ICONS.via }).addTo(map));
-  });
-  map.fitBounds(state.layers.route.getBounds(), { padding: [40, 40] });
-
-  showStats(distKm, timeH);
-
-  const name = `${state.start.label || 'Start'} → ${state.end.label || 'End'}`;
-  state.gpxContent = buildGPX({
-    name, isRoundtrip: false,
-    desc: `Motorbike P2P | Style: ${style.name} | Surface: ${state.gravelPct}% gravel | Highways: ${state.highwayPct}%${desiredKm ? " | Target: "+desiredKm+" km" : ""} | ${distKm} km · ~${timeH} h`,
-    startPt: state.start, endPt: state.end,
-    coords, viaPoints,
-  });
-
-  showStatus(`Done — ${distKm} km · ~${timeH} h · ${style.name}` +
-    (viaPoints.length ? ` · ${viaPoints.length} via points` : ''), 'success');
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// MAIN: ROUNDTRIP ROUTE
-// Two legs: Start → TurnPoint and TurnPoint → Start
-// Both legs share the same Overpass results for their corridor
-// ═══════════════════════════════════════════════════════════════════════
-async function calculateRoundtrip() {
-  if (!state.rtStart) {
-    showStatus('Set a start/home location first.', 'error'); return;
-  }
-
-  const style    = ROUTE_STYLES[state.styleKey];
-  const origin   = state.rtStart;
-
-  // Choose bearing: selected or random
-  const bearing  = state.bearingDeg !== null
-    ? state.bearingDeg
-    : Math.random() * 360;
-  const bearingLabel = state.bearingDeg !== null
-    ? COMPASS_DIRS.find(d => d.deg === state.bearingDeg)?.label || `${state.bearingDeg}°`
-    : `random (${Math.round(bearing)}°)`;
-
-  // Turn point is half the target distance away in the chosen direction
-  // (outbound + return ≈ targetKm, so leg length ≈ targetKm/2)
-  const legKm    = state.targetKm / 2;
-  const turnPt   = projectPoint(origin.lat, origin.lon, bearing, legKm);
-
-  showStatus(`[1/4] Turn point projected ${Math.round(legKm)} km ${bearingLabel}…`);
-
-  // Show turn marker immediately
-  if (state.layers.turn) map.removeLayer(state.layers.turn);
-  state.layers.turn = L.marker([turnPt.lat, turnPt.lon], { icon: ICONS.turn })
-    .bindTooltip('Turnaround point', { permanent: false })
-    .addTo(map);
-
-  let viaOut = [], viaBack = [];
-
-  // Step 2: Overpass for both legs
-  if (style.waypointCount > 0) {
-    showStatus(`[2/4] Querying OSM for ${style.name.toLowerCase()} roads…`);
-
-    const padFactor = 0.4 + style.waypointBias;
-    const countPerLeg = Math.ceil(waypointCount(style.waypointCount) / 2);
-
-    // Outbound corridor: origin → turnPt
-    const bboxOut  = buildRoundtripBbox(origin, turnPt, padFactor);
-    const dataOut  = await queryOverpass(style, bboxOut);
-    viaOut = selectWaypoints(dataOut.elements, origin, turnPt, countPerLeg, style.waypointBias);
-
-    // Return corridor: turnPt → origin (same bbox, selection picks different points)
-    const dataBack = await queryOverpass(style, bboxOut);
-    viaBack = selectWaypoints(dataBack.elements, turnPt, origin, countPerLeg, style.waypointBias);
-
-    // Snap all waypoints to actual road segments
-    const totalFound = viaOut.length + viaBack.length;
-    showStatus(`[2/4] ${totalFound} waypoints found — snapping to roads…`);
-    [viaOut, viaBack] = await Promise.all([
-      snapAllToRoads(viaOut),
-      snapAllToRoads(viaBack),
-    ]);
-    showStatus(`[2/4] Snapped ${viaOut.length + viaBack.length} waypoints ✓`);
-  } else {
-    showStatus('[2/4] Fastest — no Overpass query ✓');
-  }
-
-  // Step 3: Valhalla — two legs
-  showStatus('[3/4] Routing outbound leg via Valhalla…');
-  const legOut  = await valhallaRoute([origin, ...viaOut, turnPt]);
-
-  showStatus('[3/4] Routing return leg via Valhalla…');
-  const legBack = await valhallaRoute([turnPt, ...viaBack, origin]);
-
-  // Merge geometry — drop first point of legBack (= duplicate turn point)
-  const coordsOut  = legOut.coords;
-  const coordsBack = legBack.coords.slice(1);
-  const allCoords  = [...coordsOut, ...coordsBack];
-
-  const totalDist  = (legOut.distanceKm + legBack.distanceKm).toFixed(1);
-  const totalTime  = ((legOut.durationS + legBack.durationS) / 3600).toFixed(1);
-
-  // Step 4: Draw
-  showStatus('[4/4] Rendering roundtrip…');
-
-  // Draw outbound in accent, return in slightly dimmer color
-  const outLatLngs  = coordsOut.map(c => [c[1], c[0]]);
-  const backLatLngs = coordsBack.map(c => [c[1], c[0]]);
-
-  // Draw as one polyline for GPX, but two for visual distinction
-  state.layers.route = L.layerGroup([
-    L.polyline(outLatLngs,  { color: '#c8f060', weight: 4, opacity: 0.9,  lineJoin: 'round' }),
-    L.polyline(backLatLngs, { color: '#90c020', weight: 4, opacity: 0.75, lineJoin: 'round', dashArray: '8,4' }),
-  ]).addTo(map);
-
-  [...viaOut, ...viaBack].forEach(wp => {
-    state.layers.via.push(L.marker([wp.lat, wp.lon], { icon: ICONS.via }).addTo(map));
-  });
-
-  // Fit map to full route
-  const allLatLngs = allCoords.map(c => [c[1], c[0]]);
-  map.fitBounds(L.latLngBounds(allLatLngs), { padding: [40, 40] });
-
-  showStats(totalDist, totalTime);
-
-  const allVia = [...viaOut, ...viaBack];
-  const name   = `Roundtrip from ${origin.label || 'Home'}`;
-  state.gpxContent = buildGPX({
-    name, isRoundtrip: true,
-    desc: `Motorbike roundtrip | Style: ${style.name} | Direction: ${bearingLabel} | Surface: ${state.gravelPct}% gravel | Highways: ${state.highwayPct}% | ${totalDist} km · ~${totalTime} h`,
-    startPt: origin, endPt: origin,
-    coords: allCoords, viaPoints: allVia,
-  });
-
-  showStatus(
-    `Done — ${totalDist} km · ~${totalTime} h · ${style.name} · heading ${bearingLabel}`,
-    'success'
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// SHARED HELPERS
-// ═══════════════════════════════════════════════════════════════════════
-function showStats(distKm, timeH) {
-  document.getElementById('stat-dist').textContent = distKm;
-  document.getElementById('stat-time').textContent = timeH;
-  document.getElementById('route-stats').style.display = 'grid';
-  document.getElementById('download-btn').style.display = 'block';
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // CALCULATE BUTTON
@@ -1534,13 +1370,9 @@ async function onCalculate() {
   document.getElementById('route-stats').style.display  = 'none';
   clearRouteLayers();
   state.gpxContent = null;
-
   try {
-    if (state.mode === 'p2p') {
-      await calculateP2P();
-    } else {
-      await calculateRoundtrip();
-    }
+    if (state.mode === 'p2p') await calculateP2P();
+    else                      await calculateRoundtrip();
   } catch (err) {
     showStatus(`Error: ${err.message}`, 'error');
   } finally {
@@ -1561,9 +1393,9 @@ document.getElementById('download-btn').addEventListener('click', () => {
   a.href = url;
   const base = state.mode === 'round'
     ? (state.rtStart?.label || 'roundtrip').replace(/[^a-z0-9]/gi,'_').slice(0,20)
-    : (state.start?.label  || 'start'    ).replace(/[^a-z0-9]/gi,'_').slice(0,16)
+    : (state.start?.label || 'start').replace(/[^a-z0-9]/gi,'_').slice(0,16)
       + '_to_'
-      + (state.end?.label  || 'end'      ).replace(/[^a-z0-9]/gi,'_').slice(0,16);
+      + (state.end?.label || 'end').replace(/[^a-z0-9]/gi,'_').slice(0,16);
   a.download = `moto_${state.styleKey}_${base}.gpx`;
   a.click();
   URL.revokeObjectURL(url);
