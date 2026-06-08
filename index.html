@@ -950,43 +950,58 @@ async function buildRoute(from, to, style, statusPrefix) {
   let viaPoints = [];
 
   if (style.spacingKm !== null) {
-    // How tight to space waypoints based on highway slider
-    const spacing = effectiveSpacingKm(style.spacingKm);
-    // Pad generously — wide bbox gives Overpass more roads to pick from
-    const padKm   = Math.max(haversineKm(from, to) * 0.5, 20);
+    const spacing    = effectiveSpacingKm(style.spacingKm);
+    const straightKm = haversineKm(from, to);
+    const padKm      = Math.max(straightKm * 0.5, 20);
+    const bbox       = buildBbox(from, to, padKm);
+    const ql         = buildOverpassQuery(style, bbox);
 
-    showStatus(`${statusPrefix} Querying OSM for allowed roads (highway ≤ ${state.highwayPct}%)…`);
+    console.log('=== OVERPASS DEBUG ===');
+    console.log('bbox:', bbox);
+    console.log('spacing:', spacing, 'km');
+    console.log('straight dist:', straightKm.toFixed(1), 'km');
+    console.log('query:', ql);
 
-    const bbox = buildBbox(from, to, padKm);
-    const ql   = buildOverpassQuery(style, bbox);
+    showStatus(`${statusPrefix} Querying OSM (bbox: ${bbox.split(',').map(n=>parseFloat(n).toFixed(2)).join(',')})…`);
 
     let elements = [];
     try {
-      showStatus(`${statusPrefix} Sending Overpass query…`);
-      const raw  = await fetch('https://overpass-api.de/api/interpreter', {
+      const raw = await fetch('https://overpass-api.de/api/interpreter', {
         method: 'POST', body: ql,
         headers: { 'Content-Type': 'text/plain' },
       });
-      showStatus(`${statusPrefix} Overpass HTTP ${raw.status} — parsing…`);
+      showStatus(`${statusPrefix} Overpass HTTP ${raw.status}…`);
       if (!raw.ok) {
         const txt = await raw.text();
+        console.error('Overpass error:', raw.status, txt);
         showStatus(`${statusPrefix} Overpass error ${raw.status}: ${txt.slice(0,120)}`, 'error');
       } else {
         const data = await raw.json();
         elements = data.elements || [];
+        console.log('Elements returned:', elements.length);
+        console.log('First 3 elements:', JSON.stringify(elements.slice(0,3), null, 2));
       }
     } catch (e) {
+      console.error('Overpass fetch failed:', e);
       showStatus(`${statusPrefix} Overpass fetch failed: ${e.message}`, 'error');
     }
 
-    const straightKm = haversineKm(from, to);
-    showStatus(`${statusPrefix} ${elements.length} segments found (${Math.round(straightKm)} km straight, spacing ${spacing} km → ~${Math.floor(straightKm/spacing)} waypoints)…`);
+    showStatus(`${statusPrefix} ${elements.length} segments found — extracting coords…`);
+    const pts = extractPts(elements);
+    console.log('extractPts result:', pts.length, 'points');
+    console.log('First 3 pts:', pts.slice(0,3));
+
+    const expectedCount = Math.floor(straightKm / spacing);
+    showStatus(`${statusPrefix} ${pts.length} coords extracted — building chain (${expectedCount} waypoints expected)…`);
+
     viaPoints = buildWaypointChain(elements, from, to, spacing);
-    if (viaPoints.length === 0 && elements.length > 0) {
-      // Fallback: relax the dedup threshold and retry
+    console.log('buildWaypointChain result:', viaPoints.length);
+    if (viaPoints.length === 0 && pts.length > 0) {
+      console.log('Trying relaxed chain...');
       viaPoints = buildWaypointChainRelaxed(elements, from, to, spacing);
+      console.log('buildWaypointChainRelaxed result:', viaPoints.length);
     }
-    showStatus(`${statusPrefix} ${viaPoints.length} waypoints placed on allowed roads — routing via OSRM…`);
+    showStatus(`${statusPrefix} ${viaPoints.length} waypoints placed — routing via OSRM…`);
   } else {
     showStatus(`${statusPrefix} Fastest mode — direct OSRM routing…`);
   }
