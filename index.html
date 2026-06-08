@@ -1012,6 +1012,16 @@ async function runOverpass(ql) {
 // ═══════════════════════════════════════════════════════════════════════
 // WAYPOINT SELECTION
 // ═══════════════════════════════════════════════════════════════════════
+// How many waypoints to inject based on highway allowance
+// Lower highway % = more anchors to prevent OSRM slipping onto motorways
+function waypointCount(baseCount) {
+  const pct = state.highwayPct;
+  if (pct <= 10) return baseCount * 3;   // 0-10%:  triple density
+  if (pct <= 30) return baseCount * 2;   // 11-30%: double density
+  if (pct <= 50) return Math.round(baseCount * 1.5); // 31-50%: 1.5x
+  return baseCount;                       // 50%+:   normal
+}
+
 function selectWaypoints(elements, start, end, count, bias) {
   if (!elements?.length || count === 0) return [];
 
@@ -1052,14 +1062,43 @@ function selectWaypoints(elements, start, end, count, bias) {
   return selected;
 }
 
+// Snap a single waypoint to the nearest road using OSRM nearest API.
+// Returns the snapped {lat, lon} or the original if snapping fails.
+async function snapToRoad(wp) {
+  try {
+    const url = `https://router.project-osrm.org/nearest/v1/driving/${wp.lon},${wp.lat}?number=1`;
+    const res  = await fetch(url);
+    const data = await res.json();
+    if (data.code === 'Ok' && data.waypoints?.length) {
+      const [lon, lat] = data.waypoints[0].location;
+      return { ...wp, lat, lon };
+    }
+  } catch { /* fall through */ }
+  return wp;
+}
+
+// Snap all waypoints in parallel, with a concurrency cap to avoid flooding OSRM
+async function snapAllToRoads(waypoints) {
+  const BATCH = 4; // max parallel requests
+  const results = [];
+  for (let i = 0; i < waypoints.length; i += BATCH) {
+    const batch = waypoints.slice(i, i + BATCH);
+    const snapped = await Promise.all(batch.map(wp => snapToRoad(wp)));
+    results.push(...snapped);
+  }
+  return results;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // OSRM
 // ═══════════════════════════════════════════════════════════════════════
 async function osrmRoute(waypoints) {
+  // Motorway avoidance is enforced via dense snapped waypoints.
+  // Public OSRM server does not support &exclude=motorway.
   const coords = waypoints.map(w => `${w.lon},${w.lat}`).join(';');
-  const url    = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
-  const res    = await fetch(url);
-  const data   = await res.json();
+  const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
+  const res  = await fetch(url);
+  const data = await res.json();
   if (data.code !== 'Ok' || !data.routes.length)
     throw new Error(data.message || 'OSRM: no route found');
   return data.routes[0];
@@ -1158,20 +1197,22 @@ async function calculateP2P() {
   const style = ROUTE_STYLES[state.styleKey];
   let viaPoints = [];
 
-  // Step 1: Overpass
+  // Step 1: Overpass + waypoint selection
   if (style.waypointCount > 0) {
     showStatus(`[1/3] Querying OSM for ${style.name.toLowerCase()} roads…`);
-    const bbox = buildBbox(state.start, state.end, 0.4 + style.waypointBias);
-    const data = await queryOverpass(style, bbox);
-    viaPoints  = selectWaypoints(data.elements, state.start, state.end,
-                                 style.waypointCount, style.waypointBias);
-    showStatus(`[1/3] Found ${viaPoints.length} waypoints ✓`);
+    const bbox  = buildBbox(state.start, state.end, 0.4 + style.waypointBias);
+    const data  = await queryOverpass(style, bbox);
+    const count = waypointCount(style.waypointCount);
+    viaPoints   = selectWaypoints(data.elements, state.start, state.end, count, style.waypointBias);
+    showStatus(`[1/3] Found ${viaPoints.length} waypoints — snapping to roads…`);
+    viaPoints = await snapAllToRoads(viaPoints);
+    showStatus(`[1/3] Snapped ${viaPoints.length} waypoints to road network ✓`);
   } else {
     showStatus('[1/3] Fastest — skipping Overpass ✓');
   }
 
   // Step 2: OSRM
-  showStatus(`[2/3] Routing via OSRM (${viaPoints.length} via points)…`);
+  showStatus(`[2/3] Routing via OSRM (${viaPoints.length} anchored via points)…`);
   const allWaypoints = [state.start, ...viaPoints, state.end];
   const route  = await osrmRoute(allWaypoints);
   const coords = route.geometry.coordinates;
@@ -1244,19 +1285,25 @@ async function calculateRoundtrip() {
     showStatus(`[2/4] Querying OSM for ${style.name.toLowerCase()} roads…`);
 
     const padFactor = 0.4 + style.waypointBias;
+    const countPerLeg = Math.ceil(waypointCount(style.waypointCount) / 2);
 
     // Outbound corridor: origin → turnPt
     const bboxOut  = buildRoundtripBbox(origin, turnPt, padFactor);
     const dataOut  = await queryOverpass(style, bboxOut);
-    viaOut = selectWaypoints(dataOut.elements, origin, turnPt,
-                             Math.ceil(style.waypointCount / 2), style.waypointBias);
+    viaOut = selectWaypoints(dataOut.elements, origin, turnPt, countPerLeg, style.waypointBias);
 
-    // Return corridor: turnPt → origin (perpendicular bias flips automatically)
-    const dataBack = await queryOverpass(style, bboxOut); // same bbox, different selection
-    viaBack = selectWaypoints(dataBack.elements, turnPt, origin,
-                              Math.floor(style.waypointCount / 2), style.waypointBias);
+    // Return corridor: turnPt → origin (same bbox, selection picks different points)
+    const dataBack = await queryOverpass(style, bboxOut);
+    viaBack = selectWaypoints(dataBack.elements, turnPt, origin, countPerLeg, style.waypointBias);
 
-    showStatus(`[2/4] Overpass: ${viaOut.length + viaBack.length} total waypoints ✓`);
+    // Snap all waypoints to actual road segments
+    const totalFound = viaOut.length + viaBack.length;
+    showStatus(`[2/4] ${totalFound} waypoints found — snapping to roads…`);
+    [viaOut, viaBack] = await Promise.all([
+      snapAllToRoads(viaOut),
+      snapAllToRoads(viaBack),
+    ]);
+    showStatus(`[2/4] Snapped ${viaOut.length + viaBack.length} waypoints ✓`);
   } else {
     showStatus('[2/4] Fastest — no Overpass query ✓');
   }
