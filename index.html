@@ -754,51 +754,77 @@ function buildBbox(a, b, padKm = 10) {
 }
 
 function buildOverpassQuery(style, bbox) {
-  const types  = allowedOsmTypes();
-  // Build the highway type regex for Overpass
-  const hwRe   = `~"^(${types.join('|')})$"`;
+  const types = allowedOsmTypes();
+  const hwRe  = `~"^(${types.join('|')})$"`;
 
   // Gravel surface filter
   const surfRe = state.gravelPct >= 60
     ? `["surface"~"^(gravel|unpaved|fine_gravel|dirt|ground|compacted)$"]`
     : '';
 
-  let union = '';
+  // In OSM, forests/nature reserves are AREA elements separate from road ways.
+  // Correct Overpass syntax to find roads inside these areas:
+  //   area["landuse"="forest"](bbox) -> .a; way["highway"](area.a);
+  // We collect all scenic area types into one named set first, then query
+  // roads within them. This is efficient and correct.
+
+  if (style.scenicFilter && style.twistyFilter) {
+    // Scenic + Twisty: roads inside nature areas, biased to smallest road types
+    // plus all allowed types as fallback
+    return `[out:json][timeout:30];
+(
+  area["leisure"="nature_reserve"](${bbox}) -> .nat;
+  area["landuse"="forest"](${bbox})         -> .for;
+  area["natural"="wood"](${bbox})           -> .woo;
+  area["boundary"="national_park"](${bbox}) -> .par;
+  way["highway"~"^(unclassified|tertiary|track)$"](area.nat);
+  way["highway"~"^(unclassified|tertiary|track)$"](area.for);
+  way["highway"~"^(unclassified|tertiary|track)$"](area.woo);
+  way["highway"~"^(unclassified|tertiary|track)$"](area.par);
+  way["highway"~"^(unclassified|tertiary)$"]${surfRe}(${bbox});
+  way["highway"${hwRe}]${surfRe}(${bbox});
+${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
+);
+out center;`;
+  }
 
   if (style.scenicFilter) {
-    // Roads through nature areas — intersect with allowed highway types
-    union += `
-  way["highway"${hwRe}]["leisure"="nature_reserve"](${bbox});
-  way["highway"${hwRe}]["landuse"="forest"](${bbox});
-  way["highway"${hwRe}]["natural"="wood"](${bbox});
-  way["highway"${hwRe}]["boundary"="national_park"](${bbox});
-  way["highway"${hwRe}]["route"="scenic"](${bbox});`;
+    // Scenic only: prioritise roads through nature areas, fallback to all allowed
+    return `[out:json][timeout:30];
+(
+  area["leisure"="nature_reserve"](${bbox}) -> .nat;
+  area["landuse"="forest"](${bbox})         -> .for;
+  area["natural"="wood"](${bbox})           -> .woo;
+  area["boundary"="national_park"](${bbox}) -> .par;
+  way["highway"${hwRe}](area.nat);
+  way["highway"${hwRe}](area.for);
+  way["highway"${hwRe}](area.woo);
+  way["highway"${hwRe}](area.par);
+  way["highway"${hwRe}]["route"="scenic"](${bbox});
+  way["highway"${hwRe}]${surfRe}(${bbox});
+${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
+);
+out center;`;
   }
 
   if (style.twistyFilter) {
-    // Small winding roads — specifically unclassified and tertiary
-    union += `
-  way["highway"~"^(unclassified|tertiary)$"]${surfRe}(${bbox});`;
-    if (types.includes('secondary')) {
-      union += `
-  way["highway"="secondary"]["maxspeed"!~"^(100|110|120|130)$"]${surfRe}(${bbox});`;
-    }
+    // Twisty: unclassified and tertiary roads — naturally winding in rural areas
+    // Secondary only if highway slider allows it, with low speed limit filter
+    return `[out:json][timeout:30];
+(
+  way["highway"~"^(unclassified|tertiary)$"]${surfRe}(${bbox});
+${types.includes('secondary') ? `  way["highway"="secondary"]["maxspeed"!~"^(100|110|120|130)$"]${surfRe}(${bbox});` : ''}
+  way["highway"${hwRe}]${surfRe}(${bbox});
+${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
+);
+out center;`;
   }
 
-  if (!style.scenicFilter && !style.twistyFilter) {
-    // Generic: any allowed road type
-    union += `
-  way["highway"${hwRe}]${surfRe}(${bbox});`;
-  }
-
-  // Always include gravel tracks if gravel % is high
-  if (state.gravelPct >= 60) {
-    union += `
-  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});`;
-  }
-
+  // Generic fallback (shouldn't reach here for fastest since spacingKm=null)
   return `[out:json][timeout:30];
-(${union}
+(
+  way["highway"${hwRe}]${surfRe}(${bbox});
+${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
 );
 out center;`;
 }
