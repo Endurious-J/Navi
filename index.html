@@ -950,14 +950,25 @@ async function buildRoute(from, to, style, statusPrefix) {
 
     let elements = [];
     try {
-      const data = await runOverpass(ql);
-      elements = data.elements || [];
+      showStatus(`${statusPrefix} Sending Overpass query…`);
+      const raw  = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST', body: ql,
+        headers: { 'Content-Type': 'text/plain' },
+      });
+      showStatus(`${statusPrefix} Overpass HTTP ${raw.status} — parsing…`);
+      if (!raw.ok) {
+        const txt = await raw.text();
+        showStatus(`${statusPrefix} Overpass error ${raw.status}: ${txt.slice(0,120)}`, 'error');
+      } else {
+        const data = await raw.json();
+        elements = data.elements || [];
+      }
     } catch (e) {
-      showStatus(`${statusPrefix} Overpass unavailable — routing direct…`);
+      showStatus(`${statusPrefix} Overpass fetch failed: ${e.message}`, 'error');
     }
 
     const straightKm = haversineKm(from, to);
-    showStatus(`${statusPrefix} ${elements.length} road segments found (${Math.round(straightKm)} km route, spacing ${spacing} km → ~${Math.floor(straightKm/spacing)} waypoints expected)…`);
+    showStatus(`${statusPrefix} ${elements.length} segments found (${Math.round(straightKm)} km straight, spacing ${spacing} km → ~${Math.floor(straightKm/spacing)} waypoints)…`);
     viaPoints = buildWaypointChain(elements, from, to, spacing);
     if (viaPoints.length === 0 && elements.length > 0) {
       // Fallback: relax the dedup threshold and retry
