@@ -482,23 +482,35 @@ async function buildRoute(from,to,style,label) {
       // Waypoints per chunk: proportional to chunk length
       const waypointsInChunk = Math.max(1, Math.round(straightKm / numChunks / spacing));
 
-      try {
-        showStatus(`${label} Chunk ${c+1}/${numChunks} (${waypointsInChunk} waypoints)…`);
-        const raw = await fetch('https://overpass-api.de/api/interpreter', {
-          method: 'POST', body: ql,
-          headers: { 'Content-Type': 'text/plain' },
-        });
-        if (raw.ok) {
-          const data  = await raw.json();
-          const elems = data.elements || [];
-          // Select waypoints within this chunk only
-          const chunkWps = buildWaypointChain(elems, segFrom, segTo, spacing);
-          viaPoints = viaPoints.concat(chunkWps);
-        } else {
-          showStatus(`${label} Chunk ${c+1} HTTP ${raw.status} — skipping`);
+      // Delay between chunks to avoid rate limiting (429)
+      if (c > 0) await new Promise(r => setTimeout(r, 1000));
+
+      // Try each chunk up to 2 times (retry once on 504/429)
+      let chunkDone = false;
+      for (let attempt = 1; attempt <= 2 && !chunkDone; attempt++) {
+        try {
+          showStatus(`${label} Chunk ${c+1}/${numChunks}${attempt>1?' (retry)':''}…`);
+          const raw = await fetch('https://overpass-api.de/api/interpreter', {
+            method: 'POST', body: ql,
+            headers: { 'Content-Type': 'text/plain' },
+          });
+          if (raw.ok) {
+            const data  = await raw.json();
+            const elems = data.elements || [];
+            const chunkWps = buildWaypointChain(elems, segFrom, segTo, spacing);
+            viaPoints = viaPoints.concat(chunkWps);
+            chunkDone = true;
+          } else if (raw.status === 429 || raw.status === 504) {
+            showStatus(`${label} Chunk ${c+1} HTTP ${raw.status} — waiting 5s before retry…`);
+            await new Promise(r => setTimeout(r, 5000));
+          } else {
+            showStatus(`${label} Chunk ${c+1} HTTP ${raw.status} — skipping`);
+            chunkDone = true; // don't retry other errors
+          }
+        } catch(e) {
+          showStatus(`${label} Chunk ${c+1} error: ${e.message} — skipping`);
+          chunkDone = true;
         }
-      } catch(e) {
-        showStatus(`${label} Chunk ${c+1} error: ${e.message} — skipping`);
       }
     }
 
