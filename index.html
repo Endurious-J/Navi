@@ -463,9 +463,9 @@ async function buildRoute(from,to,style,label) {
 
     showStatus(`${label} Querying Overpass (${Math.round(straightKm)} km, ${numChunks} chunk${numChunks>1?'s':''}, spacing ${spacing} km)…`);
 
-    let elements = [];
+    // Query each chunk independently and select waypoints per chunk.
+    // This prevents first-half elements from crowding out second-half picks.
     for (let c = 0; c < numChunks; c++) {
-      // Interpolate segment start and end along the straight line
       const t0 = c / numChunks;
       const t1 = (c + 1) / numChunks;
       const segFrom = {
@@ -479,15 +479,21 @@ async function buildRoute(from,to,style,label) {
       const bbox = buildBbox(segFrom, segTo, padKm);
       const ql   = buildOverpassQuery(style, bbox);
 
+      // Waypoints per chunk: proportional to chunk length
+      const waypointsInChunk = Math.max(1, Math.round(straightKm / numChunks / spacing));
+
       try {
-        showStatus(`${label} Chunk ${c+1}/${numChunks}…`);
+        showStatus(`${label} Chunk ${c+1}/${numChunks} (${waypointsInChunk} waypoints)…`);
         const raw = await fetch('https://overpass-api.de/api/interpreter', {
           method: 'POST', body: ql,
           headers: { 'Content-Type': 'text/plain' },
         });
         if (raw.ok) {
-          const data = await raw.json();
-          elements = elements.concat(data.elements || []);
+          const data  = await raw.json();
+          const elems = data.elements || [];
+          // Select waypoints within this chunk only
+          const chunkWps = buildWaypointChain(elems, segFrom, segTo, spacing);
+          viaPoints = viaPoints.concat(chunkWps);
         } else {
           showStatus(`${label} Chunk ${c+1} HTTP ${raw.status} — skipping`);
         }
@@ -496,9 +502,7 @@ async function buildRoute(from,to,style,label) {
       }
     }
 
-    showStatus(`${label} ${elements.length} segments → building waypoints…`);
-    viaPoints = buildWaypointChain(elements,from,to,spacing);
-    showStatus(`${label} ${viaPoints.length} waypoints — routing…`);
+    showStatus(`${label} ${viaPoints.length} waypoints placed — routing…`);
   } else {
     showStatus(`${label} Direct routing (fastest)…`);
   }
