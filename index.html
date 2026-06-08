@@ -772,7 +772,7 @@ function buildOverpassQuery(style, bbox) {
   if (style.scenicFilter && style.twistyFilter) {
     // Scenic + Twisty: roads inside nature areas, biased to smallest road types
     // plus all allowed types as fallback
-    return `[out:json][timeout:30];
+    return `[out:json][timeout:30][maxsize:8388608];
 (
   area["leisure"="nature_reserve"](${bbox}) -> .nat;
   area["landuse"="forest"](${bbox})         -> .for;
@@ -786,12 +786,12 @@ function buildOverpassQuery(style, bbox) {
   way["highway"${hwRe}]${surfRe}(${bbox});
 ${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
 );
-out center;`;
+out center qt 2000;`;
   }
 
   if (style.scenicFilter) {
     // Scenic only: prioritise roads through nature areas, fallback to all allowed
-    return `[out:json][timeout:30];
+    return `[out:json][timeout:30][maxsize:8388608];
 (
   area["leisure"="nature_reserve"](${bbox}) -> .nat;
   area["landuse"="forest"](${bbox})         -> .for;
@@ -805,29 +805,29 @@ out center;`;
   way["highway"${hwRe}]${surfRe}(${bbox});
 ${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
 );
-out center;`;
+out center qt 2000;`;
   }
 
   if (style.twistyFilter) {
     // Twisty: unclassified and tertiary roads — naturally winding in rural areas
     // Secondary only if highway slider allows it, with low speed limit filter
-    return `[out:json][timeout:30];
+    return `[out:json][timeout:30][maxsize:8388608];
 (
   way["highway"~"^(unclassified|tertiary)$"]${surfRe}(${bbox});
 ${types.includes('secondary') ? `  way["highway"="secondary"]["maxspeed"!~"^(100|110|120|130)$"]${surfRe}(${bbox});` : ''}
   way["highway"${hwRe}]${surfRe}(${bbox});
 ${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
 );
-out center;`;
+out center qt 2000;`;
   }
 
   // Generic fallback (shouldn't reach here for fastest since spacingKm=null)
-  return `[out:json][timeout:30];
+  return `[out:json][timeout:30][maxsize:8388608];
 (
   way["highway"${hwRe}]${surfRe}(${bbox});
 ${state.gravelPct >= 60 ? `  way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});` : ''}
 );
-out center;`;
+out center qt 2000;`;
 }
 
 async function runOverpass(ql) {
@@ -837,6 +837,24 @@ async function runOverpass(ql) {
   });
   if (!res.ok) throw new Error(`Overpass HTTP ${res.status}`);
   return res.json();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// COORDINATE EXTRACTION
+// Overpass "out center qt;" returns a center{lat,lon} for each way.
+// This works for both closed polygons AND linear ways in modern Overpass.
+// We also handle nodes (lat/lon directly on element) as fallback.
+// ═══════════════════════════════════════════════════════════════════════
+function extractPts(elements) {
+  const pts = [];
+  for (const el of elements) {
+    if (el.center?.lat != null && el.center?.lon != null) {
+      pts.push({ lat: el.center.lat, lon: el.center.lon });
+    } else if (el.lat != null && el.lon != null) {
+      pts.push({ lat: el.lat, lon: el.lon });
+    }
+  }
+  return pts;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -853,11 +871,7 @@ async function runOverpass(ql) {
 // ═══════════════════════════════════════════════════════════════════════
 function buildWaypointChain(elements, start, end, spacingKm) {
   if (!elements?.length) return [];
-
-  // Extract center coords from Overpass way elements
-  const pts = elements
-    .filter(el => el.center || (el.lat && el.lon))
-    .map(el => ({ lat: el.center?.lat ?? el.lat, lon: el.center?.lon ?? el.lon }));
+  const pts = extractPts(elements);
   if (!pts.length) return [];
 
   const totalKm = haversineKm(start, end);
@@ -891,9 +905,7 @@ function buildWaypointChain(elements, start, end, spacingKm) {
 // Relaxed version — no dedup, just picks nearest point to each segment position.
 // Used as fallback when strict version returns 0 waypoints.
 function buildWaypointChainRelaxed(elements, start, end, spacingKm) {
-  const pts = elements
-    .filter(el => el.center || (el.lat && el.lon))
-    .map(el => ({ lat: el.center?.lat ?? el.lat, lon: el.center?.lon ?? el.lon }));
+  const pts = extractPts(elements);
   if (!pts.length) return [];
 
   const totalKm = haversineKm(start, end);
@@ -916,7 +928,6 @@ function buildWaypointChainRelaxed(elements, start, end, spacingKm) {
   return selected;
 }
 
-// Relaxed fallback — no dedup, picks nearest point per segment position
 // ═══════════════════════════════════════════════════════════════════════
 // OSRM ROUTING
 // ═══════════════════════════════════════════════════════════════════════
@@ -1454,7 +1465,7 @@ document.getElementById('debug-btn').addEventListener('click', async () => {
 (
   way["highway"="unclassified"](${bbox});
 );
-out center;`;
+out center qt 2000;`;
 
   try {
     showStatus('Sending simple test query (unclassified roads)…');
