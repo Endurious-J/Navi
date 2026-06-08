@@ -742,14 +742,15 @@ function effectiveSpacingKm(baseSpacing) {
 // OVERPASS
 // ═══════════════════════════════════════════════════════════════════════
 function buildBbox(a, b, padKm = 10) {
-  // Pad by a fixed km amount in each direction for consistent results
-  const padDeg = padKm / 111;
+  const padLat = padKm / 111;
+  const midLat = (a.lat + b.lat) / 2;
+  const padLon = padKm / (111 * Math.cos(midLat * Math.PI / 180));
   return [
-    Math.min(a.lat, b.lat) - padDeg,
-    Math.min(a.lon, b.lon) - padDeg,
-    Math.max(a.lat, b.lat) + padDeg,
-    Math.max(a.lon, b.lon) + padDeg,
-  ].map(v => v.toFixed(5)).join(',');
+    (Math.min(a.lat, b.lat) - padLat).toFixed(5),
+    (Math.min(a.lon, b.lon) - padLon).toFixed(5),
+    (Math.max(a.lat, b.lat) + padLat).toFixed(5),
+    (Math.max(a.lon, b.lon) + padLon).toFixed(5),
+  ].join(',');
 }
 
 function buildOverpassQuery(style, bbox) {
@@ -832,28 +833,26 @@ function buildWaypointChain(elements, start, end, spacingKm) {
     .map(el => ({ lat: el.center?.lat ?? el.lat, lon: el.center?.lon ?? el.lon }));
   if (!pts.length) return [];
 
-  const totalKm  = haversineKm(start, end);
-  const count    = Math.max(1, Math.floor(totalKm / spacingKm));
+  const totalKm = haversineKm(start, end);
+  const count   = Math.max(1, Math.floor(totalKm / spacingKm));
   const selected = [];
 
   for (let i = 1; i <= count; i++) {
     const t = i / (count + 1);
-    // Target position along the straight line
+    // Target position along the straight line A→B
     const target = {
       lat: start.lat + (end.lat - start.lat) * t,
       lon: start.lon + (end.lon - start.lon) * t,
     };
 
-    // Find the closest unused Overpass point to this target
+    // Find the closest road element to this target position.
+    // No distance cap — if Overpass returned it, it's in our bbox, use it.
+    // Skip points already selected (within 1 km of an existing waypoint).
     let best = null, bestDist = Infinity;
     for (const p of pts) {
-      // Skip if this point was already picked (within 0.5 km)
-      if (selected.some(s => haversineKm(s, p) < 0.5)) continue;
+      if (selected.some(s => haversineKm(s, p) < 1.0)) continue;
       const d = haversineKm(target, p);
-      // Only consider points within 2× the spacing distance of the target
-      if (d < bestDist && d < spacingKm * 2) {
-        bestDist = d; best = p;
-      }
+      if (d < bestDist) { bestDist = d; best = p; }
     }
 
     if (best) selected.push({ lat: best.lat, lon: best.lon });
@@ -862,6 +861,35 @@ function buildWaypointChain(elements, start, end, spacingKm) {
   return selected;
 }
 
+// Relaxed version — no dedup, just picks nearest point to each segment position.
+// Used as fallback when strict version returns 0 waypoints.
+function buildWaypointChainRelaxed(elements, start, end, spacingKm) {
+  const pts = elements
+    .filter(el => el.center || (el.lat && el.lon))
+    .map(el => ({ lat: el.center?.lat ?? el.lat, lon: el.center?.lon ?? el.lon }));
+  if (!pts.length) return [];
+
+  const totalKm = haversineKm(start, end);
+  const count   = Math.max(1, Math.floor(totalKm / spacingKm));
+  const selected = [];
+
+  for (let i = 1; i <= count; i++) {
+    const t      = i / (count + 1);
+    const target = {
+      lat: start.lat + (end.lat - start.lat) * t,
+      lon: start.lon + (end.lon - start.lon) * t,
+    };
+    let best = null, bestDist = Infinity;
+    for (const p of pts) {
+      const d = haversineKm(target, p);
+      if (d < bestDist) { bestDist = d; best = p; }
+    }
+    if (best) selected.push({ lat: best.lat, lon: best.lon });
+  }
+  return selected;
+}
+
+// Relaxed fallback — no dedup, picks nearest point per segment position
 // ═══════════════════════════════════════════════════════════════════════
 // OSRM ROUTING
 // ═══════════════════════════════════════════════════════════════════════
@@ -886,7 +914,8 @@ async function buildRoute(from, to, style, statusPrefix) {
   if (style.spacingKm !== null) {
     // How tight to space waypoints based on highway slider
     const spacing = effectiveSpacingKm(style.spacingKm);
-    const padKm   = Math.max(haversineKm(from, to) * 0.3, 15);
+    // Pad generously — wide bbox gives Overpass more roads to pick from
+    const padKm   = Math.max(haversineKm(from, to) * 0.5, 20);
 
     showStatus(`${statusPrefix} Querying OSM for allowed roads (highway ≤ ${state.highwayPct}%)…`);
 
@@ -901,9 +930,14 @@ async function buildRoute(from, to, style, statusPrefix) {
       showStatus(`${statusPrefix} Overpass unavailable — routing direct…`);
     }
 
-    showStatus(`${statusPrefix} ${elements.length} road segments found — building ${spacing} km waypoint chain…`);
+    const straightKm = haversineKm(from, to);
+    showStatus(`${statusPrefix} ${elements.length} road segments found (${Math.round(straightKm)} km route, spacing ${spacing} km → ~${Math.floor(straightKm/spacing)} waypoints expected)…`);
     viaPoints = buildWaypointChain(elements, from, to, spacing);
-    showStatus(`${statusPrefix} ${viaPoints.length} waypoints placed — routing via OSRM…`);
+    if (viaPoints.length === 0 && elements.length > 0) {
+      // Fallback: relax the dedup threshold and retry
+      viaPoints = buildWaypointChainRelaxed(elements, from, to, spacing);
+    }
+    showStatus(`${statusPrefix} ${viaPoints.length} waypoints placed on allowed roads — routing via OSRM…`);
   } else {
     showStatus(`${statusPrefix} Fastest mode — direct OSRM routing…`);
   }
