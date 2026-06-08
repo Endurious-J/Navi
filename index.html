@@ -439,6 +439,28 @@
           <div class="coord-display" id="end-coord"></div>
         </div>
       </div>
+
+      <div style="margin-top:12px;">
+        <div class="section-label">Desired distance <span style="color:var(--text-dim);font-size:9px;letter-spacing:0">(optional)</span></div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="number" id="p2p-km-input" placeholder="e.g. 200"
+            min="10" max="2000" step="10"
+            style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:7px;
+                   color:var(--text);font-family:'Syne',sans-serif;font-size:13px;
+                   padding:8px 10px;outline:none;transition:border-color 0.15s;"
+            onfocus="this.style.borderColor='var(--accent)'"
+            onblur="this.style.borderColor='var(--border)'">
+          <span style="font-size:12px;color:var(--text-muted);white-space:nowrap;">km</span>
+          <button onclick="document.getElementById('p2p-km-input').value=''"
+            style="background:transparent;border:1px solid var(--border);border-radius:6px;
+                   color:var(--text-muted);cursor:pointer;padding:6px 9px;font-size:11px;
+                   transition:all 0.15s;"
+            title="Clear">✕</button>
+        </div>
+        <div style="margin-top:4px;font-size:10px;font-family:'DM Mono',monospace;color:var(--text-dim);">
+          Leave blank for direct A→B without distance target
+        </div>
+      </div>
     </div>
 
     <!-- ══ ROUNDTRIP panel ══ -->
@@ -658,6 +680,7 @@ const state = {
   rtStart:  null,       // roundtrip start (= end)
   gravelPct: 20,
   highwayPct: 30,   // 0 = no highways, 100 = fully allowed
+  desiredKmP2P: null,  // optional desired km for P2P (null = no target)
   styleKey: 'fastest',
   pinMode:  null,
   targetKm: 150,
@@ -813,18 +836,21 @@ function highwayHint(pct) {
 }
 
 // Returns extra Overpass filter clause to append when highways should be avoided
-function highwayAvoidClause(bbox) {
-  return `
-  way["highway"~"^(unclassified|tertiary|secondary)$"](${bbox});
-  way["highway"="primary"]["maxspeed"!~"^(100|110|120|130)$"](${bbox});`;
+// Road types allowed at each highway % level — Overpass only returns
+// roads within this set, so snapping can never land on a motorway.
+function allowedHighwayTypes() {
+  const pct = state.highwayPct;
+  if (pct <=  0) return '~"^(unclassified|track)$"';
+  if (pct <= 20) return '~"^(unclassified|tertiary|track)$"';
+  if (pct <= 40) return '~"^(unclassified|tertiary|secondary|track)$"';
+  if (pct <= 60) return '~"^(unclassified|tertiary|secondary|primary)$"';
+  if (pct <= 80) return '~"^(unclassified|tertiary|secondary|primary|trunk)$"';
+  return '~"^(unclassified|tertiary|secondary|primary|trunk|motorway)$"';
 }
-
-// Returns whether the highway% warrants injecting highway-avoiding waypoints
-function shouldAvoidHighways() { return state.highwayPct < 50; }
 
 function gravelOverpassClause(bbox) {
   return `
-  way["highway"~"^(unclassified|tertiary|track)$"]["surface"~"^(gravel|unpaved|fine_gravel|dirt|ground|compacted)$"](${bbox});
+  way["highway"${allowedHighwayTypes()}]["surface"~"^(gravel|unpaved|fine_gravel|dirt|ground|compacted)$"](${bbox});
   way["highway"="track"]["tracktype"~"^(grade1|grade2)$"](${bbox});`;
 }
 
@@ -1012,14 +1038,23 @@ async function runOverpass(ql) {
 // ═══════════════════════════════════════════════════════════════════════
 // WAYPOINT SELECTION
 // ═══════════════════════════════════════════════════════════════════════
-// How many waypoints to inject based on highway allowance
-// Lower highway % = more anchors to prevent OSRM slipping onto motorways
+// Effective waypoint count — more anchors when highways must be avoided
 function waypointCount(baseCount) {
   const pct = state.highwayPct;
-  if (pct <= 10) return baseCount * 3;   // 0-10%:  triple density
-  if (pct <= 30) return baseCount * 2;   // 11-30%: double density
-  if (pct <= 50) return Math.round(baseCount * 1.5); // 31-50%: 1.5x
-  return baseCount;                       // 50%+:   normal
+  if (pct <=  0) return baseCount * 4;
+  if (pct <= 20) return baseCount * 3;
+  if (pct <= 40) return baseCount * 2;
+  if (pct <= 60) return Math.round(baseCount * 1.5);
+  return baseCount;
+}
+
+// Haversine distance in km between two {lat,lon} points
+function haversineKm(a, b) {
+  const dLat = (b.lat - a.lat) * DEG2RAD;
+  const dLon = (b.lon - a.lon) * DEG2RAD;
+  const h = Math.sin(dLat/2)**2 +
+            Math.cos(a.lat*DEG2RAD) * Math.cos(b.lat*DEG2RAD) * Math.sin(dLon/2)**2;
+  return 2 * EARTH_KM * Math.asin(Math.sqrt(h));
 }
 
 function selectWaypoints(elements, start, end, count, bias) {
@@ -1030,11 +1065,22 @@ function selectWaypoints(elements, start, end, count, bias) {
     .map(el => ({ lat: el.center?.lat ?? el.lat, lon: el.center?.lon ?? el.lon }));
   if (!pts.length) return [];
 
+  // Work in real km so bias is distance-proportional, not coordinate-proportional.
+  // Cap perpendicular nudge at 25% of the straight-line distance.
+  const straightKm = haversineKm(start, end);
+  const maxNudgeKm = Math.min(straightKm * 0.25, 40); // never more than 40 km off-track
+
+  // Coordinate-space direction vector
   const dLat = end.lat - start.lat;
   const dLon = end.lon - start.lon;
   const len  = Math.sqrt(dLat * dLat + dLon * dLon) || 1;
+
+  // Perpendicular unit vector in coordinate space
   const pLat = -dLon / len;
   const pLon =  dLat / len;
+
+  // Convert maxNudgeKm to approximate degrees (1 deg lat ≈ 111 km)
+  const nudgeDeg = maxNudgeKm / 111;
 
   const selected = [];
   for (let i = 1; i <= count; i++) {
@@ -1042,19 +1088,22 @@ function selectWaypoints(elements, start, end, count, bias) {
     const mLat = start.lat + dLat * t;
     const mLon = start.lon + dLon * t;
 
+    // Find nearest unused Overpass point to this segment position
     let best = null, bestDist = Infinity;
     for (const p of pts) {
       if (selected.some(s =>
-        Math.abs(s._sLat - p.lat) < 0.01 &&
-        Math.abs(s._sLon - p.lon) < 0.01)) continue;
+        Math.abs(s._sLat - p.lat) < 0.008 &&
+        Math.abs(s._sLon - p.lon) < 0.008)) continue;
       const d = (p.lat - mLat) ** 2 + (p.lon - mLon) ** 2;
       if (d < bestDist) { bestDist = d; best = p; }
     }
     if (best) {
+      // Alternate sides, nudge capped to nudgeDeg
       const side = (i % 2 === 0) ? 1 : -1;
+      const nudge = nudgeDeg * bias * side;
       selected.push({
-        lat: best.lat + pLat * bias * len * side,
-        lon: best.lon + pLon * bias * len * side,
+        lat: best.lat + pLat * nudge,
+        lon: best.lon + pLon * nudge,
         _sLat: best.lat, _sLon: best.lon,
       });
     }
@@ -1107,18 +1156,62 @@ async function osrmRoute(waypoints) {
 // ═══════════════════════════════════════════════════════════════════════
 // OVERPASS QUERY HELPER (with optional gravel injection)
 // ═══════════════════════════════════════════════════════════════════════
+// Build Overpass query filtered to only road types allowed by the highway slider.
+// This is the key fix: Overpass only returns candidate roads that OSRM is
+// allowed to snap to — motorways simply don't appear in the result set.
+function buildFilteredQuery(style, bbox) {
+  const hwFilter = allowedHighwayTypes();
+  const base = style.overpassQuery(bbox);
+
+  // Build a cleaned union that intersects each way clause with the allowed types.
+  // Strategy: wrap the entire result in an additional highway filter.
+  let ql = `
+[out:json][timeout:30];
+(
+  way["highway"${hwFilter}](${bbox});
+)->.allowed;
+(`;
+
+  // Add style-specific sub-queries, each intersected with .allowed
+  if (style.key === 'scenic' || style.key === 'scenic_twisty') {
+    ql += `
+  way["leisure"="nature_reserve"]["highway"${hwFilter}](${bbox});
+  way["boundary"="national_park"]["highway"${hwFilter}](${bbox});
+  way["landuse"="forest"]["highway"${hwFilter}](${bbox});
+  way["natural"="wood"]["highway"${hwFilter}](${bbox});
+  way["route"="scenic"]["highway"${hwFilter}](${bbox});`;
+  }
+  if (style.key === 'twisty' || style.key === 'scenic_twisty') {
+    ql += `
+  way["highway"="unclassified"](${bbox});
+  way["highway"="tertiary"](${bbox});`;
+    // Only add secondary/primary if highway % allows them
+    if (state.highwayPct >= 30) ql += `
+  way["highway"="secondary"](${bbox});`;
+    if (state.highwayPct >= 60) ql += `
+  way["highway"="primary"](${bbox});`;
+  }
+  if (style.key === 'fastest') {
+    ql += `
+  way["highway"${hwFilter}](${bbox});`;
+  }
+
+  // Gravel clause if needed
+  if (state.gravelPct >= 60) {
+    ql += gravelOverpassClause(bbox);
+  }
+
+  ql += `
+);
+out center;`;
+  return ql;
+}
+
 async function queryOverpass(style, bbox) {
   if (!style.overpassQuery || style.waypointCount === 0) return { elements: [] };
-
-  let ql = style.overpassQuery(bbox);
-  // Inject gravel-seeking roads when surface preference is high
-  if (state.gravelPct >= 60) {
-    ql = ql.replace(/\);\s*out center;/, `${gravelOverpassClause(bbox)}\n);\nout center;`);
-  }
-  // Inject small-road preference when highway allowance is low
-  if (shouldAvoidHighways() && style.waypointCount > 0) {
-    ql = ql.replace(/\);\s*out center;/, `${highwayAvoidClause(bbox)}\n);\nout center;`);
-  }
+  // Attach the style key so buildFilteredQuery can branch on it
+  style = { ...style, key: Object.keys(ROUTE_STYLES).find(k => ROUTE_STYLES[k] === style) || style.key };
+  const ql = buildFilteredQuery(style, bbox);
   try {
     return await runOverpass(ql);
   } catch {
@@ -1211,6 +1304,33 @@ async function calculateP2P() {
     showStatus('[1/3] Fastest — skipping Overpass ✓');
   }
 
+  // Step 1b: if desired km set, add extra stretch waypoints
+  const desiredKm = parseFloat(document.getElementById('p2p-km-input').value) || null;
+  if (desiredKm) {
+    const straightKm = haversineKm(state.start, state.end);
+    if (desiredKm > straightKm * 1.1) {
+      // We need to stretch the route — project additional side waypoints
+      // proportional to how much extra distance is needed
+      const extraKm   = desiredKm - straightKm;
+      const nudgeKm   = Math.min(extraKm * 0.4, 150); // reasonable cap
+      const midLat    = (state.start.lat + state.end.lat) / 2;
+      const midLon    = (state.start.lon + state.end.lon) / 2;
+      const dLat      = state.end.lat - state.start.lat;
+      const dLon      = state.end.lon - state.start.lon;
+      const len       = Math.sqrt(dLat*dLat + dLon*dLon) || 1;
+      const pLat      = -dLon / len;
+      const pLon      =  dLat / len;
+      const nudgeDeg  = nudgeKm / 111;
+      // Two stretch waypoints, one each side of the midpoint
+      const stretchA  = { lat: midLat + pLat * nudgeDeg * 0.6, lon: midLon + pLon * nudgeDeg * 0.6 };
+      const stretchB  = { lat: midLat - pLat * nudgeDeg * 0.6, lon: midLon - pLon * nudgeDeg * 0.6 };
+      const snapped   = await snapAllToRoads([stretchA, stretchB]);
+      // Insert stretch points around existing viaPoints
+      viaPoints = [snapped[0], ...viaPoints, snapped[1]];
+      showStatus(`[1/3] Stretch waypoints added for ~${Math.round(desiredKm)} km target ✓`);
+    }
+  }
+
   // Step 2: OSRM
   showStatus(`[2/3] Routing via OSRM (${viaPoints.length} anchored via points)…`);
   const allWaypoints = [state.start, ...viaPoints, state.end];
@@ -1235,7 +1355,7 @@ async function calculateP2P() {
   const name = `${state.start.label || 'Start'} → ${state.end.label || 'End'}`;
   state.gpxContent = buildGPX({
     name, isRoundtrip: false,
-    desc: `Motorbike P2P | Style: ${style.name} | Surface: ${state.gravelPct}% gravel | Highways: ${state.highwayPct}% | ${distKm} km · ~${timeH} h`,
+    desc: `Motorbike P2P | Style: ${style.name} | Surface: ${state.gravelPct}% gravel | Highways: ${state.highwayPct}%${desiredKm ? " | Target: "+desiredKm+" km" : ""} | ${distKm} km · ~${timeH} h`,
     startPt: state.start, endPt: state.end,
     coords, viaPoints,
   });
