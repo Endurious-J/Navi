@@ -1111,46 +1111,79 @@ function selectWaypoints(elements, start, end, count, bias) {
   return selected;
 }
 
-// Snap a single waypoint to the nearest road using OSRM nearest API.
-// Returns the snapped {lat, lon} or the original if snapping fails.
-async function snapToRoad(wp) {
-  try {
-    const url = `https://router.project-osrm.org/nearest/v1/driving/${wp.lon},${wp.lat}?number=1`;
-    const res  = await fetch(url);
-    const data = await res.json();
-    if (data.code === 'Ok' && data.waypoints?.length) {
-      const [lon, lat] = data.waypoints[0].location;
-      return { ...wp, lat, lon };
-    }
-  } catch { /* fall through */ }
-  return wp;
-}
-
-// Snap all waypoints in parallel, with a concurrency cap to avoid flooding OSRM
+// Snapping is no longer needed — Valhalla snaps internally.
+// Keep as pass-through so calling code doesn't need changes.
 async function snapAllToRoads(waypoints) {
-  const BATCH = 4; // max parallel requests
-  const results = [];
-  for (let i = 0; i < waypoints.length; i += BATCH) {
-    const batch = waypoints.slice(i, i + BATCH);
-    const snapped = await Promise.all(batch.map(wp => snapToRoad(wp)));
-    results.push(...snapped);
-  }
-  return results;
+  return waypoints;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // OSRM
 // ═══════════════════════════════════════════════════════════════════════
-async function osrmRoute(waypoints) {
-  // Motorway avoidance is enforced via dense snapped waypoints.
-  // Public OSRM server does not support &exclude=motorway.
-  const coords = waypoints.map(w => `${w.lon},${w.lat}`).join(';');
-  const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
-  const res  = await fetch(url);
+// Decode a Valhalla encoded polyline6 string into [[lon,lat], ...] pairs
+function decodePolyline6(encoded) {
+  let index = 0, lat = 0, lon = 0;
+  const coords = [];
+  while (index < encoded.length) {
+    let b, shift = 0, result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lat += (result & 1) ? ~(result >> 1) : result >> 1;
+    shift = 0; result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lon += (result & 1) ? ~(result >> 1) : result >> 1;
+    coords.push([lon / 1e6, lat / 1e6]); // [lon, lat] to match OSRM convention
+  }
+  return coords;
+}
+
+async function valhallaRoute(waypoints) {
+  // Map highway slider (0-100) to Valhalla use_highways (0.0-1.0)
+  const useHighways    = state.highwayPct / 100;
+  // Map gravel slider (0-100) to use_trails (0.0-1.0)
+  const useTrails      = state.gravelPct  / 100;
+
+  const locations = waypoints.map(w => ({ lat: w.lat, lon: w.lon }));
+
+  const body = {
+    locations,
+    costing: 'motorcycle',
+    costing_options: {
+      motorcycle: {
+        use_highways: useHighways,
+        use_trails:   useTrails,
+        use_ferry:    0.1,
+      }
+    },
+    units: 'km',
+    shape_format: 'polyline6',
+  };
+
+  const res  = await fetch('https://valhalla1.openstreetmap.de/route', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const err = await res.text().catch(() => res.statusText);
+    throw new Error(`Valhalla: ${err}`);
+  }
+
   const data = await res.json();
-  if (data.code !== 'Ok' || !data.routes.length)
-    throw new Error(data.message || 'OSRM: no route found');
-  return data.routes[0];
+  if (!data.trip?.legs?.length) throw new Error('Valhalla: no route returned');
+
+  // Merge all leg shapes into one coordinate array [[lon,lat],...]
+  const coords = data.trip.legs.flatMap(leg => decodePolyline6(leg.shape));
+
+  // Sum up distance and time across legs
+  const distanceKm = data.trip.summary.length;   // already in km (units:'km')
+  const durationS  = data.trip.summary.time;     // seconds
+
+  return {
+    coords,                          // [[lon,lat],...]
+    distanceKm,
+    durationS,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1331,13 +1364,13 @@ async function calculateP2P() {
     }
   }
 
-  // Step 2: OSRM
-  showStatus(`[2/3] Routing via OSRM (${viaPoints.length} anchored via points)…`);
+  // Step 2: Valhalla motorcycle routing
+  showStatus(`[2/3] Routing via Valhalla (highways: ${state.highwayPct}%, trails: ${state.gravelPct}%)…`);
   const allWaypoints = [state.start, ...viaPoints, state.end];
-  const route  = await osrmRoute(allWaypoints);
-  const coords = route.geometry.coordinates;
-  const distKm = (route.distance / 1000).toFixed(1);
-  const timeH  = (route.duration / 3600).toFixed(1);
+  const result = await valhallaRoute(allWaypoints);
+  const coords = result.coords;
+  const distKm = result.distanceKm.toFixed(1);
+  const timeH  = (result.durationS / 3600).toFixed(1);
 
   // Step 3: Draw
   showStatus('[3/3] Rendering…');
@@ -1428,20 +1461,20 @@ async function calculateRoundtrip() {
     showStatus('[2/4] Fastest — no Overpass query ✓');
   }
 
-  // Step 3: OSRM — two legs
-  showStatus('[3/4] Routing outbound leg…');
-  const legOut  = await osrmRoute([origin, ...viaOut, turnPt]);
+  // Step 3: Valhalla — two legs
+  showStatus('[3/4] Routing outbound leg via Valhalla…');
+  const legOut  = await valhallaRoute([origin, ...viaOut, turnPt]);
 
-  showStatus('[3/4] Routing return leg…');
-  const legBack = await osrmRoute([turnPt, ...viaBack, origin]);
+  showStatus('[3/4] Routing return leg via Valhalla…');
+  const legBack = await valhallaRoute([turnPt, ...viaBack, origin]);
 
   // Merge geometry — drop first point of legBack (= duplicate turn point)
-  const coordsOut  = legOut.geometry.coordinates;
-  const coordsBack = legBack.geometry.coordinates.slice(1);
+  const coordsOut  = legOut.coords;
+  const coordsBack = legBack.coords.slice(1);
   const allCoords  = [...coordsOut, ...coordsBack];
 
-  const totalDist  = ((legOut.distance + legBack.distance) / 1000).toFixed(1);
-  const totalTime  = ((legOut.duration + legBack.duration) / 3600).toFixed(1);
+  const totalDist  = (legOut.distanceKm + legBack.distanceKm).toFixed(1);
+  const totalTime  = ((legOut.durationS + legBack.durationS) / 3600).toFixed(1);
 
   // Step 4: Draw
   showStatus('[4/4] Rendering roundtrip…');
